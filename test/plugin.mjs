@@ -7,7 +7,8 @@ await esbuild.build({
   bundle: true,
   format: "esm",
   platform: "node",
-  alias: { obsidian: "./test/obsidian-mock.js" },
+  // 번들과 테스트가 같은 가짜 obsidian 모듈 인스턴스를 쓰도록 외부 모듈로 연결
+  plugins: [{ name: "mock", setup: (b) => b.onResolve({ filter: /^obsidian$/ }, () => ({ path: new URL("./obsidian-mock.js", import.meta.url).href, external: true })) }],
   external: ["jsdom", "turndown", "turndown-plugin-gfm"],
   outfile: "test/tmp_build/main.mjs",
   logLevel: "warning",

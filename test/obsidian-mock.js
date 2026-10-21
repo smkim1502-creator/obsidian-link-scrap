@@ -17,6 +17,16 @@ export async function requestUrl({ url, headers = {} }) {
 }
 
 export const notices = (globalThis.__notices ??= []);
+export const parseFrontMatterTags = (fm) => {
+  const t = fm && fm.tags;
+  if (!t) return null;
+  return (Array.isArray(t) ? t : String(t).split(/[,s]+/)).filter(Boolean).map((x) => "#" + String(x).replace(/^#/, ""));
+};
+export const parseFrontMatterAliases = (fm) => {
+  const a = fm && (fm.aliases || fm.alias);
+  return a ? (Array.isArray(a) ? a : [a]).map(String) : null;
+};
+
 export class Notice {
   constructor(msg) {
     notices.push(msg);
@@ -65,6 +75,12 @@ export class Vault {
     this.files.set(p, f);
     return f;
   }
+  async cachedRead(f) {
+    return f.data;
+  }
+  on() {
+    return {};
+  }
   createBinary(p, buf) {
     return this.create(p, buf);
   }
@@ -90,6 +106,7 @@ export class Plugin {
     this.protocol = fn;
   }
   addSettingTab() {}
+  registerEvent() {}
 }
 export class Modal {}
 export class PluginSettingTab {}

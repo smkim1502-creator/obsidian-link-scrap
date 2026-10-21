@@ -10,9 +10,13 @@ import {
   requestUrl,
   htmlToMarkdown,
   Platform,
+  TFile,
+  parseFrontMatterTags,
+  parseFrontMatterAliases,
 } from "obsidian";
 import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
+import { buildIndex, suggest } from "./related.js";
 
 const DEFAULT_SETTINGS = {
   rootFolder: "스크랩",
@@ -20,7 +24,15 @@ const DEFAULT_SETTINGS = {
   saveImages: false,
   imageFolder: "_resources/스크랩",
   openAfter: true,
+  autoTags: true,
+  autoLinks: true,
+  maxRelated: 3,
+  // 비교 대상에서 아예 뺄 폴더 (작업 기록 등)
+  excludeFolders: "클로드 코드 프로젝트, 해결해야 할 문제",
 };
+
+const splitList = (s) => (s || "").split(",").map((x) => x.trim().replace(/^\/+|\/+$/g, "")).filter(Boolean);
+const inFolders = (path, folders) => folders.some((f) => path === f || path.startsWith(f + "/"));
 
 const io = {
   request: async (url, userAgent) => {
@@ -117,6 +129,47 @@ export default class LinkScrapPlugin extends Plugin {
     });
 
     this.addSettingTab(new LinkScrapSettingTab(this.app, this));
+
+    // 관련 노트 색인은 처음 쓸 때 만들고, 노트가 바뀌면 다음 스크랩 때 다시 만든다
+    this.index = null;
+    const invalidate = (f) => f instanceof TFile && f.extension === "md" && (this.index = null);
+    for (const ev of ["create", "modify", "delete", "rename"]) this.registerEvent(this.app.vault.on(ev, invalidate));
+  }
+
+  async getIndex() {
+    if (this.index) return this.index;
+    const excluded = splitList(this.settings.excludeFolders);
+    const files = this.app.vault.getMarkdownFiles().filter((f) => !inFolders(f.path, excluded));
+    const notes = await Promise.all(
+      files.map(async (f) => {
+        const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+        return {
+          path: f.path,
+          title: f.basename,
+          text: await this.app.vault.cachedRead(f),
+          tags: (parseFrontMatterTags(fm) || []).map((t) => t.replace(/^#/, "")),
+          aliases: parseFrontMatterAliases(fm) || [],
+        };
+      })
+    );
+    this.index = buildIndex(notes);
+    return this.index;
+  }
+
+  // 자동 태그·관련 노트. 실패해도 스크랩 자체는 저장되도록 오류를 삼킨다
+  async autoSuggest(title, markdown, folder) {
+    const s = this.settings;
+    if (!s.autoTags && !s.autoLinks) return { tags: [], related: [] };
+    try {
+      const out = suggest(await this.getIndex(), { title, markdown, folder }, {
+        maxRelated: s.maxRelated,
+        excludeFolders: [s.rootFolder, ...splitList(s.excludeFolders)],
+      });
+      return { tags: s.autoTags ? out.tags : [], related: s.autoLinks ? out.related : [] };
+    } catch (e) {
+      console.error("[link-scrap] 자동 태그·링크 실패", e);
+      return { tags: [], related: [] };
+    }
   }
 
   async readClipboard() {
@@ -209,16 +262,27 @@ export default class LinkScrapPlugin extends Plugin {
         body = this.settings.saveImages ? await this.downloadImages(r.markdown, name) : r.markdown;
       }
 
-      let fm = `---\nurl: ${yamlValue(r.url)}\n`;
-      if (tags.length) fm += `tags:\n${tags.map((t) => `  - ${yamlValue(t.replace(/^#/, ""))}`).join("\n")}\n`;
-      fm += "---\n";
+      const auto = await this.autoSuggest(r.title, r.markdown || "", folder);
+      tags = [...new Set([...tags.map((t) => t.replace(/^#/, "")), ...auto.tags])];
       const notePath = this.uniquePath(folder, name, "md");
-      const file = await this.app.vault.create(notePath, `${fm}# ${r.title}\n\n${body}`);
+
+      let fm = `---\nurl: ${yamlValue(r.url)}\n`;
+      if (tags.length) fm += `tags:\n${tags.map((t) => `  - ${yamlValue(t)}`).join("\n")}\n`;
+      fm += "---\n";
+      // 기존 스크랩과 같은 형식: frontmatter 바로 아래 "관련 노트: [[…]]"
+      const links = auto.related
+        .map((x) => this.app.vault.getAbstractFileByPath(x.path))
+        .filter((f) => f instanceof TFile)
+        .map((f) => `[[${this.app.metadataCache.fileToLinktext(f, notePath, true)}]]`);
+      const relatedLine = links.length ? `관련 노트: ${links.join(", ")}\n\n` : "";
+      const file = await this.app.vault.create(notePath, `${fm}${relatedLine}# ${r.title}\n\n${body}`);
 
       this.settings.lastFolder = folder;
       await this.saveData(this.settings);
       notice.hide();
-      new Notice(r.fallback ? `본문을 찾지 못해 미리보기만 저장했습니다: ${name}` : `스크랩 완료: ${name}`, 5000);
+      const extra = [tags.length && `태그 ${tags.join(", ")}`, links.length && `관련 노트 ${links.length}개`].filter(Boolean).join(" · ");
+      const head = r.fallback ? `본문을 찾지 못해 미리보기만 저장했습니다: ${name}` : `스크랩 완료: ${name}`;
+      new Notice(extra ? `${head}\n${extra}` : head, 6000);
       if (this.settings.openAfter) await this.app.workspace.getLeaf(false).openFile(file);
       return file;
     } catch (e) {
@@ -254,7 +318,8 @@ class ScrapModal extends Modal {
       this.plugin.scrapFolders().forEach((f) => d.addOption(f, f));
       d.setValue(this.folder).onChange((v) => (this.folder = v));
     });
-    new Setting(contentEl).setName("태그").setDesc("쉼표로 구분, 비워도 됨").addText((t) =>
+    const tagDesc = this.plugin.settings.autoTags ? "쉼표로 구분. 비워도 자동 태그는 붙음" : "쉼표로 구분, 비워도 됨";
+    new Setting(contentEl).setName("태그").setDesc(tagDesc).addText((t) =>
       t.setPlaceholder("AI, 경제/반도체").onChange((v) => (this.tags = v))
     );
     new Setting(contentEl).addButton((b) => b.setButtonText("스크랩").setCta().onClick(() => this.submit()));
@@ -309,5 +374,27 @@ class LinkScrapSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("스크랩 후 노트 열기")
       .addToggle((t) => t.setValue(s.openAfter).onChange((v) => ((s.openAfter = v), save())));
+
+    new Setting(containerEl).setName("자동 태그·관련 노트").setHeading();
+    new Setting(containerEl)
+      .setName("태그 자동으로 달기")
+      .setDesc("저장할 폴더에서 주로 쓰는 태그, 본문에 이름이 여러 번 나오는 태그, 아주 비슷한 노트의 태그를 붙입니다.")
+      .addToggle((t) => t.setValue(s.autoTags).onChange((v) => ((s.autoTags = v), save())));
+    new Setting(containerEl)
+      .setName("관련 노트 자동으로 링크")
+      .setDesc("내용이 비슷하거나 본문에 제목이 나오는 내 노트를 frontmatter 아래 '관련 노트:' 줄에 넣습니다. 스크랩 폴더의 노트끼리는 링크하지 않습니다.")
+      .addToggle((t) => t.setValue(s.autoLinks).onChange((v) => ((s.autoLinks = v), save())));
+    new Setting(containerEl)
+      .setName("관련 노트 최대 개수")
+      .addDropdown((d) => {
+        ["1", "2", "3", "4", "5"].forEach((n) => d.addOption(n, n));
+        d.setValue(String(s.maxRelated)).onChange((v) => ((s.maxRelated = Number(v)), save()));
+      });
+    new Setting(containerEl)
+      .setName("비교에서 뺄 폴더")
+      .setDesc("쉼표로 구분. 이 폴더의 노트는 태그·관련 노트 계산에 쓰지 않습니다.")
+      .addText((t) =>
+        t.setValue(s.excludeFolders).onChange((v) => ((s.excludeFolders = v), (this.plugin.index = null), save()))
+      );
   }
 }
