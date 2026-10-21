@@ -1,5 +1,5 @@
 // 실제 Vault 노트를 가짜 옵시디언에 읽어 넣고 새 글을 스크랩해, 자동 태그·관련 노트가 어떻게 달리는지 본다.
-// 실제 Vault는 읽기만 한다 (저장은 메모리에서만).  node test/real_vault.mjs "폴더" url [url …]
+// 실제 Vault는 읽기만 한다 (저장은 메모리에서만).  node test/real_vault.mjs "폴더|auto" url [url …]
 import esbuild from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
@@ -67,7 +67,7 @@ console.log(`Vault 노트 ${vault.getMarkdownFiles().length}개 로드`);
 
 for (const url of urls) {
   const t0 = Date.now();
-  const f = await plugin.scrap(url, folder, []);
+  const f = await plugin.scrap(url, folder === "auto" ? "__auto__" : folder, []);
   if (!f) {
     console.log(`\n실패 ${url}: ${mock.notices.at(-1)}`);
     continue;
@@ -84,5 +84,15 @@ if (process.env.DEBUG) {
   for (const f of vault.getMarkdownFiles().filter((f) => f.path.startsWith(folder + "/") && !fs.existsSync(path.join(VAULT, f.path)))) {
     const s = suggest(idx, { title: f.basename, markdown: f.data, folder, excludePath: f.path }, { minScore: 0, maxRelated: 6, excludeFolders: ["스크랩", "클로드 코드 프로젝트", "해결해야 할 문제"] });
     console.log(`\n[후보] ${f.basename.slice(0, 30)}\n  ` + s.related.map((r) => `${r.title}(${r.score}${r.mentioned ? ",언급" : ""})`).join("\n  "));
+  }
+}
+
+// 폴더 분류 점수 보기 (DEBUG=1)
+if (process.env.DEBUG) {
+  const { suggestFolder } = await import("../src/related.js");
+  const idx = await plugin.getIndex();
+  for (const f of vault.getMarkdownFiles().filter((f) => f.path.startsWith("스크랩/") && !fs.existsSync(path.join(VAULT, f.path)))) {
+    const url = (f.data.match(/^url: "?([^"\n]+)/m) || [])[1];
+    for (const ms of [0]) console.log(`[폴더 점수] ${f.basename.slice(0, 30)} →`, suggestFolder(idx, { title: f.basename, markdown: f.data, url, excludePath: f.path }, { minScore: ms }));
   }
 }

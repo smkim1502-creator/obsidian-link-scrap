@@ -2,7 +2,7 @@
 // Vault를 읽기만 한다. 직접 달아 둔 관련 노트 링크·태그를 지운 채 추천을 돌려, 원래 것을 얼마나 맞히는지 본다.
 import fs from "node:fs";
 import path from "node:path";
-import { buildIndex, suggest } from "../src/related.js";
+import { buildIndex, suggest, suggestFolder } from "../src/related.js";
 
 const VAULT = "C:/Users/sec/Obsidian Vault/Second Brain";
 const EXCLUDE = /^(\.obsidian|\.trash|클로드 코드 프로젝트|해결해야 할 문제)(\/|$)/;
@@ -34,7 +34,8 @@ const notes = walk(VAULT).map((rel) => {
   for (const block of [line && line[0], sec && sec[0]]) {
     for (const m of (block || "").matchAll(/\[\[([^\]|#]+)/g)) gold.add(m[1].trim());
   }
-  return { path: rel, title: path.basename(rel, ".md"), text, tags: fmList(fm, "tags"), aliases: fmList(fm, "aliases"), gold };
+  const url = (fm.match(/^url:\s*"?([^"\n]+)"?/m) || [])[1] || "";
+  return { path: rel, title: path.basename(rel, ".md"), url, text, tags: fmList(fm, "tags"), aliases: fmList(fm, "aliases"), gold };
 });
 const OPTS = { excludeFolders: ["스크랩"], ...JSON.parse(process.argv[2] || "{}") };
 const titles = new Set(notes.map((n) => n.title));
@@ -84,3 +85,26 @@ const isNintendo = (n) => n.path.includes("닌텐도 채용 키워드");
 evalLinks("관련 노트 — 스크랩(닌텐도 시리즈 제외)", notes.filter((n) => n.path.startsWith("스크랩/") && !isNintendo(n)));
 evalLinks("관련 노트 — 닌텐도 키워드 시리즈", notes.filter(isNintendo));
 evalTags("태그 — 스크랩(닌텐도 시리즈 제외)", notes.filter((n) => n.path.startsWith("스크랩/") && !isNintendo(n)));
+
+// 폴더 자동 분류: 원래 폴더(스크랩/게임/공식 깊이까지)를 맞히는지
+function evalFolders(label, subset, opts = {}) {
+  const clip = (f) => f.split("/").slice(0, 3).join("/");
+  let ok = 0;
+  const confusion = new Map();
+  for (const n of subset) {
+    const actual = clip(path.dirname(n.path));
+    const got = suggestFolder(index, { title: n.title, markdown: n.text, url: n.url, excludePath: n.path }, { ...OPTS.folder, ...opts }).folder;
+    if (got === actual) ok++;
+    else {
+      if (opts.show) console.log(`  ✗ ${n.title.slice(0, 40)}  ${actual} → ${got}`);
+      confusion.set(actual + " → " + got, (confusion.get(actual + " → " + got) || 0) + 1);
+    }
+  }
+  console.log(`
+[${label}] ${subset.length}개: 폴더 적중 ${ok}/${subset.length} (${((ok / subset.length) * 100).toFixed(0)}%)`);
+  [...confusion].sort((a, b) => b[1] - a[1]).forEach(([k, v]) => console.log(`  ${v}× ${k}`));
+}
+const scraps = notes.filter((n) => n.path.startsWith("스크랩/"));
+evalFolders("폴더 — 스크랩(닌텐도 시리즈 제외)", scraps.filter((n) => !isNintendo(n)), { show: process.env.SHOW });
+evalFolders("폴더 — 닌텐도 키워드 시리즈", scraps.filter(isNintendo));
+evalFolders("폴더 — 사이트 가산점 없이(시리즈 제외)", scraps.filter((n) => !isNintendo(n)), { hostBonus: 0 });

@@ -16,8 +16,16 @@ export const DEFAULT_OPTS = {
   folderTagShare: 0.5, // 같은 폴더 노트의 절반 이상이 단 태그
   tagMentionMin: 3, // 태그 이름이 본문에 이만큼 나오면
   neighborTagScore: 0.35, // 이만큼 비슷한 노트의 태그는 빌려온다
-  shortLen: 0, // 토큰이 이보다 적은 짧은 노트는 유사도를 깎는다 (짧을수록 우연히 겹치기 쉬움)
   excludeFolders: [], // 관련 노트 후보에서 뺄 폴더 (스크랩끼리는 링크하지 않는다)
+};
+
+export const DEFAULT_FOLDER_OPTS = {
+  root: "스크랩",
+  maxDepth: 2, // 스크랩/게임/공식 까지
+  perFolderTop: 2, // 폴더마다 가장 비슷한 노트 2개의 평균
+  hostBonus: 0.15, // 같은 사이트 글이면 가산
+  hubWeight: 1, // 노트의 평소 유사도를 얼마나 뺄지
+  minScore: 0.05, // 이보다 낮으면 최상위 폴더에 둔다 (어느 폴더와도 안 맞는 글)
 };
 
 // 마크다운에서 비교에 쓸 글만 남긴다
@@ -60,7 +68,7 @@ function countOf(hay, needle) {
 }
 
 /**
- * @param {{path:string, title:string, aliases?:string[], tags?:string[], text:string}[]} notes
+ * @param {{path:string, title:string, url?:string, aliases?:string[], tags?:string[], text:string}[]} notes
  */
 export function buildIndex(notes) {
   const df = new Map();
@@ -70,7 +78,15 @@ export function buildIndex(notes) {
     const bodyTokens = tokenize(plainText(n.text));
     const tf = termFreq([...tt, ...tt, ...tt, ...bodyTokens]);
     for (const t of tf.keys()) df.set(t, (df.get(t) || 0) + 1);
-    return { path: n.path, title: n.title, folder: folderOf(n.path), tags: (n.tags || []).filter(validTag), aliases: n.aliases || [], len: bodyTokens.length, tf };
+    return {
+      path: n.path,
+      title: n.title,
+      folder: folderOf(n.path),
+      host: hostOf(n.url || ""),
+      tags: (n.tags || []).filter(validTag),
+      aliases: n.aliases || [],
+      tf,
+    };
   });
   const N = docs.length;
   const idf = (t) => Math.log((N + 1) / ((df.get(t) || 0) + 1)) + 1;
@@ -115,9 +131,8 @@ export function buildIndex(notes) {
  * @param {{title:string, markdown:string, folder?:string, excludePath?:string}} input
  * @returns {{related:{path:string,title:string,score:number,mentioned:boolean}[], tags:string[]}}
  */
-export function suggest(index, { title, markdown, folder = "", excludePath }, options = {}) {
-  const o = { ...DEFAULT_OPTS, ...options };
-  const body = plainText(markdown);
+// 새 글과 모든 노트의 코사인 유사도
+function similarities(index, title, body, excludePath) {
   const tt = tokenize(title);
   const tf = termFreq([...tt, ...tt, ...tt, ...tokenize(body)]);
   const q = new Map();
@@ -128,9 +143,7 @@ export function suggest(index, { title, markdown, folder = "", excludePath }, op
     qn += w * w;
   }
   qn = Math.sqrt(qn) || 1;
-  const flat = normName(title + " " + body);
-
-  const scored = [];
+  const out = [];
   for (const d of index.docs) {
     if (d.path === excludePath) continue;
     let dot = 0;
@@ -139,11 +152,86 @@ export function suggest(index, { title, markdown, folder = "", excludePath }, op
       const v = big.get(t);
       if (v) dot += w * v;
     }
-    let sim = dot / (qn * d.norm);
-    if (o.shortLen && d.len < o.shortLen) sim *= Math.sqrt(d.len / o.shortLen);
-    const hit = d.names.find((n) => n.generic <= o.genericRatio && n.norm.length >= 3 && flat.includes(n.norm));
-    scored.push({ d, sim, mention: hit ? hit.norm : null });
+    out.push({ d, sim: dot / (qn * d.norm) });
   }
+  return out;
+}
+
+// 스크랩 노트마다 다른 스크랩들과의 평균 유사도 (처음 한 번 계산해 색인에 보관)
+function hubness(index, under) {
+  if (index.hub) return index.hub;
+  const docs = index.docs.filter((d) => under(d.path));
+  const sum = new Map(docs.map((d) => [d, 0]));
+  for (let i = 0; i < docs.length; i++) {
+    for (let j = i + 1; j < docs.length; j++) {
+      const a = docs[i], b = docs[j];
+      const [small, big] = a.vec.size < b.vec.size ? [a.vec, b.vec] : [b.vec, a.vec];
+      let dot = 0;
+      for (const [t, w] of small) {
+        const v = big.get(t);
+        if (v) dot += w * v;
+      }
+      const sim = dot / (a.norm * b.norm);
+      sum.set(a, sum.get(a) + sim);
+      sum.set(b, sum.get(b) + sim);
+    }
+  }
+  index.hub = new Map(docs.map((d) => [d, sum.get(d) / Math.max(1, docs.length - 1)]));
+  return index.hub;
+}
+
+const hostOf = (url) => {
+  try {
+    return new URL(url).hostname.replace(/^(www|m)\./, "");
+  } catch {
+    return "";
+  }
+};
+
+/**
+ * 스크랩 최상위 폴더 아래에서 새 글이 들어갈 폴더를 고른다.
+ * 비슷한 스크랩·같은 사이트의 스크랩이 모여 있는 폴더. 폴더마다 상위 몇 개만 세서 큰 폴더가 수로 이기지 않게 한다.
+ * @returns {{folder:string, score:number}}  마땅한 곳이 없으면 folder = root
+ */
+export function suggestFolder(index, { title, markdown, url = "", excludePath }, options = {}) {
+  const o = { ...DEFAULT_FOLDER_OPTS, ...options };
+  const root = o.root.replace(/\/+$/, "");
+  const under = (p) => p.startsWith(root + "/");
+  // root 아래 maxDepth 단계까지만 (스크랩/게임/공식/닌텐도 채용 키워드 → 스크랩/게임/공식)
+  const clip = (folder) => {
+    if (!under(folder + "/") || folder === root) return root;
+    return [root, ...folder.slice(root.length + 1).split("/").slice(0, o.maxDepth)].join("/");
+  };
+  const host = hostOf(url);
+  const hub = hubness(index, under);
+  const perFolder = new Map();
+  for (const { d, sim } of similarities(index, title, plainText(markdown), excludePath)) {
+    if (!under(d.path)) continue;
+    // 긴 인터뷰처럼 어떤 글과도 적당히 비슷한 노트가 표를 쓸어 가지 않도록, 그 노트의 평소 유사도를 뺀다
+    const score = sim - o.hubWeight * (hub.get(d) || 0) + (host && d.host === host ? o.hostBonus : 0);
+    const f = clip(d.folder);
+    const list = perFolder.get(f) || [];
+    list.push(score);
+    perFolder.set(f, list);
+  }
+  let best = { folder: root, score: 0 };
+  for (const [folder, list] of perFolder) {
+    const top = list.sort((a, b) => b - a).slice(0, o.perFolderTop);
+    const score = top.reduce((a, b) => a + b, 0) / o.perFolderTop;
+    if (score > best.score) best = { folder, score };
+  }
+  return best.score >= o.minScore ? { folder: best.folder, score: +best.score.toFixed(3) } : { folder: root, score: +best.score.toFixed(3) };
+}
+
+export function suggest(index, { title, markdown, folder = "", excludePath }, options = {}) {
+  const o = { ...DEFAULT_OPTS, ...options };
+  const body = plainText(markdown);
+  const flat = normName(title + " " + body);
+
+  const scored = similarities(index, title, body, excludePath).map((s) => {
+    const hit = s.d.names.find((n) => n.generic <= o.genericRatio && n.norm.length >= 3 && flat.includes(n.norm));
+    return { ...s, mention: hit ? hit.norm : null };
+  });
 
   // 언급된 제목이 다른 언급된 제목에 포함되면(스플래툰 ⊂ 스플래툰 2) 짧은 쪽은 언급으로 치지 않는다
   const mentions = scored.filter((s) => s.mention).map((s) => s.mention);

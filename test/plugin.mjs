@@ -48,8 +48,9 @@ assert.equal(f2, f1);
 assert.equal(vault.files.size, before);
 console.log("2 중복 감지 OK:", mock.notices.at(-1));
 
-// 3) 프로토콜 핸들러 + 이미지 Vault 저장 (디시 이미지)
+// 3) 프로토콜 핸들러 + 이미지 Vault 저장 (디시 이미지). 자동 분류를 끄면 마지막 폴더로 간다
 plugin.settings.saveImages = true;
+plugin.settings.autoFolder = false;
 await plugin.protocol({ action: "scrap", url: "디시 글 https://m.dcinside.com/board/thesingularity/1407506", tags: "AI" });
 await new Promise((r) => setTimeout(r, 15000));
 const f3 = [...vault.files.values()].find((f) => f.path === "스크랩/AI/AI 수학 발전의 역사.md");
@@ -60,12 +61,18 @@ assert.ok(!/dcimg/.test(f3.data), "원격 이미지 주소가 남으면 안 됨"
 console.log(`3 프로토콜+이미지 저장 OK: 이미지 ${imgs.length}개`, imgs.slice(0, 2));
 console.log(f3.data.slice(0, 300));
 plugin.settings.saveImages = false;
+plugin.settings.autoFolder = true;
 
 // 4) PDF
 const f4 = await plugin.scrap("https://www.nintendo.co.jp/ir/pdf/2026/qa2606.pdf", "스크랩", []);
 assert.ok(vault.files.has("스크랩/qa2606.pdf"));
 assert.match(f4.data, /!\[\[qa2606\.pdf\]\]/);
 console.log("4 PDF OK:", f4.path);
+
+// 4-1) 자동 분류: 비교할 스크랩이 없으면 최상위 폴더
+const f5 = await plugin.scrap("https://brunch.co.kr/@hiclemi/152", "__auto__", []);
+assert.equal(f5.path, "스크랩/AI 시대, 비개발자는 무엇을 해야 하나.md");
+console.log("4-1 자동 분류(빈 Vault → 최상위) OK:", mock.notices.at(-1).replace(/\n/g, " / "));
 
 // 5) 실패 시 알림
 await plugin.scrap("https://arca.live/b/aihomelab/185810092", "스크랩", []);

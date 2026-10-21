@@ -16,7 +16,10 @@ import {
 } from "obsidian";
 import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
-import { buildIndex, suggest } from "./related.js";
+import { buildIndex, suggest, suggestFolder } from "./related.js";
+
+// 입력창·명령에서 "내용을 보고 폴더 고르기"를 뜻하는 값
+const AUTO_FOLDER = "__auto__";
 
 const DEFAULT_SETTINGS = {
   rootFolder: "스크랩",
@@ -24,6 +27,7 @@ const DEFAULT_SETTINGS = {
   saveImages: false,
   imageFolder: "_resources/스크랩",
   openAfter: true,
+  autoFolder: true,
   autoTags: true,
   autoLinks: true,
   maxRelated: 3,
@@ -111,11 +115,11 @@ export default class LinkScrapPlugin extends Plugin {
     this.addCommand({ id: "scrap-link", name: "링크 스크랩", callback: () => this.openModal() });
     this.addCommand({
       id: "scrap-clipboard",
-      name: "클립보드 링크 바로 스크랩 (마지막 폴더)",
+      name: "클립보드 링크 바로 스크랩",
       callback: async () => {
         const url = findUrl(await this.readClipboard());
         if (!url) return new Notice("클립보드에 링크가 없습니다");
-        this.scrap(url, this.settings.lastFolder, []);
+        this.scrap(url, this.defaultFolder(), []);
       },
     });
 
@@ -125,7 +129,7 @@ export default class LinkScrapPlugin extends Plugin {
       if (!url) return this.openModal();
       const tags = (params.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       if (params.ask === "1" || params.ask === "true") return this.openModal(url);
-      this.scrap(url, params.folder || this.settings.lastFolder, tags);
+      this.scrap(url, params.folder || this.defaultFolder(), tags);
     });
 
     this.addSettingTab(new LinkScrapSettingTab(this.app, this));
@@ -147,6 +151,7 @@ export default class LinkScrapPlugin extends Plugin {
           path: f.path,
           title: f.basename,
           text: await this.app.vault.cachedRead(f),
+          url: typeof fm?.url === "string" ? fm.url : "",
           tags: (parseFrontMatterTags(fm) || []).map((t) => t.replace(/^#/, "")),
           aliases: parseFrontMatterAliases(fm) || [],
         };
@@ -154,6 +159,22 @@ export default class LinkScrapPlugin extends Plugin {
     );
     this.index = buildIndex(notes);
     return this.index;
+  }
+
+  defaultFolder() {
+    return this.settings.autoFolder ? AUTO_FOLDER : this.settings.lastFolder;
+  }
+
+  // 내용을 보고 스크랩 하위 폴더를 고른다. 실패하면 최상위 폴더
+  async autoFolder(title, markdown, url) {
+    const root = normalizePath(this.settings.rootFolder);
+    try {
+      const { folder } = suggestFolder(await this.getIndex(), { title, markdown, url }, { root });
+      return this.app.vault.getAbstractFileByPath(folder) instanceof TFolder ? folder : root;
+    } catch (e) {
+      console.error("[link-scrap] 폴더 자동 분류 실패", e);
+      return root;
+    }
   }
 
   // 자동 태그·관련 노트. 실패해도 스크랩 자체는 저장되도록 오류를 삼킨다
@@ -250,6 +271,8 @@ export default class LinkScrapPlugin extends Plugin {
     const notice = new Notice("스크랩 중…", 0);
     try {
       const r = await scrapUrl(url, io);
+      const auto = folder === AUTO_FOLDER;
+      if (auto) folder = await this.autoFolder(r.title, r.markdown || "", r.url);
       await this.ensureFolder(folder);
       const name = safeFileName(r.title);
 
@@ -262,25 +285,32 @@ export default class LinkScrapPlugin extends Plugin {
         body = this.settings.saveImages ? await this.downloadImages(r.markdown, name) : r.markdown;
       }
 
-      const auto = await this.autoSuggest(r.title, r.markdown || "", folder);
-      tags = [...new Set([...tags.map((t) => t.replace(/^#/, "")), ...auto.tags])];
+      const sug = await this.autoSuggest(r.title, r.markdown || "", folder);
+      tags = [...new Set([...tags.map((t) => t.replace(/^#/, "")), ...sug.tags])];
       const notePath = this.uniquePath(folder, name, "md");
 
       let fm = `---\nurl: ${yamlValue(r.url)}\n`;
       if (tags.length) fm += `tags:\n${tags.map((t) => `  - ${yamlValue(t)}`).join("\n")}\n`;
       fm += "---\n";
       // 기존 스크랩과 같은 형식: frontmatter 바로 아래 "관련 노트: [[…]]"
-      const links = auto.related
+      const links = sug.related
         .map((x) => this.app.vault.getAbstractFileByPath(x.path))
         .filter((f) => f instanceof TFile)
         .map((f) => `[[${this.app.metadataCache.fileToLinktext(f, notePath, true)}]]`);
       const relatedLine = links.length ? `관련 노트: ${links.join(", ")}\n\n` : "";
       const file = await this.app.vault.create(notePath, `${fm}${relatedLine}# ${r.title}\n\n${body}`);
 
-      this.settings.lastFolder = folder;
-      await this.saveData(this.settings);
+      // 직접 고른 폴더만 기억한다 (자동 분류 결과는 다음 기본값이 되지 않게)
+      if (!auto) {
+        this.settings.lastFolder = folder;
+        await this.saveData(this.settings);
+      }
       notice.hide();
-      const extra = [tags.length && `태그 ${tags.join(", ")}`, links.length && `관련 노트 ${links.length}개`].filter(Boolean).join(" · ");
+      const extra = [
+        auto && `→ ${folder}`,
+        tags.length && `태그 ${tags.join(", ")}`,
+        links.length && `관련 노트 ${links.length}개`,
+      ].filter(Boolean).join(" · ");
       const head = r.fallback ? `본문을 찾지 못해 미리보기만 저장했습니다: ${name}` : `스크랩 완료: ${name}`;
       new Notice(extra ? `${head}\n${extra}` : head, 6000);
       if (this.settings.openAfter) await this.app.workspace.getLeaf(false).openFile(file);
@@ -298,9 +328,8 @@ class ScrapModal extends Modal {
     super(app);
     this.plugin = plugin;
     this.url = url;
-    this.folder = plugin.scrapFolders().includes(plugin.settings.lastFolder)
-      ? plugin.settings.lastFolder
-      : plugin.settings.rootFolder;
+    const last = plugin.defaultFolder();
+    this.folder = last === AUTO_FOLDER || plugin.scrapFolders().includes(last) ? last : plugin.settings.rootFolder;
     this.tags = "";
   }
 
@@ -315,6 +344,7 @@ class ScrapModal extends Modal {
       t.inputEl.style.width = "100%";
     });
     new Setting(contentEl).setName("폴더").addDropdown((d) => {
+      d.addOption(AUTO_FOLDER, "자동 분류 (내용 보고 고르기)");
       this.plugin.scrapFolders().forEach((f) => d.addOption(f, f));
       d.setValue(this.folder).onChange((v) => (this.folder = v));
     });
@@ -375,7 +405,11 @@ class LinkScrapSettingTab extends PluginSettingTab {
       .setName("스크랩 후 노트 열기")
       .addToggle((t) => t.setValue(s.openAfter).onChange((v) => ((s.openAfter = v), save())));
 
-    new Setting(containerEl).setName("자동 태그·관련 노트").setHeading();
+    new Setting(containerEl).setName("자동 분류·태그·관련 노트").setHeading();
+    new Setting(containerEl)
+      .setName("폴더 자동 분류")
+      .setDesc("켜면 입력창의 기본값과 '클립보드 링크 바로 스크랩'이 내용과 사이트를 보고 하위 폴더(예: 스크랩/AI)를 고릅니다. 끄면 마지막에 고른 폴더에 저장합니다.")
+      .addToggle((t) => t.setValue(s.autoFolder).onChange((v) => ((s.autoFolder = v), save())));
     new Setting(containerEl)
       .setName("태그 자동으로 달기")
       .setDesc("저장할 폴더에서 주로 쓰는 태그, 본문에 이름이 여러 번 나오는 태그, 아주 비슷한 노트의 태그를 붙입니다.")
