@@ -1,12 +1,9 @@
 // 실제 URL로 추출 결과를 확인한다: node test/run.mjs [url ...]
 // 플러그인과 같은 scrapUrl()을 쓰되, 옵시디언 API 대신 fetch/jsdom/turndown을 주입한다.
-// (옵시디언의 htmlToMarkdown과 turndown은 표·서식이 약간 다를 수 있다)
-import { JSDOM } from "jsdom";
-import TurndownService from "turndown";
-import { gfm } from "turndown-plugin-gfm";
 import fs from "node:fs";
 import { scrapUrl } from "../src/scrap.js";
 import { safeFileName } from "../src/extract.js";
+import { io } from "./node-io.mjs";
 
 const DEFAULT_URLS = [
   "https://m.dcinside.com/board/thesingularity/1407506",
@@ -26,17 +23,6 @@ const DEFAULT_URLS = [
   "공유 텍스트에 섞인 링크 https://story.pay.naver.com/content/1965_29_C2 입니다",
   "https://www.nintendo.co.jp/ir/pdf/2026/qa2606.pdf",
 ];
-
-const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-" });
-td.use(gfm);
-const io = {
-  request: async (url, userAgent) => {
-    const res = await fetch(url, { headers: { "User-Agent": userAgent, "Accept-Language": "ko-KR,ko;q=0.9,ja;q=0.8,en;q=0.7" } });
-    return { status: res.status, contentType: res.headers.get("content-type") || "", body: await res.arrayBuffer() };
-  },
-  parseHtml: (html, url) => new JSDOM(html, { url }).window.document,
-  toMarkdown: (html) => td.turndown(html),
-};
 
 const outDir = new URL("./tmp_out/", import.meta.url);
 fs.mkdirSync(outDir, { recursive: true });

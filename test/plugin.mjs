@@ -16,23 +16,16 @@ await esbuild.build({
 const mock = await import("./obsidian-mock.js");
 const { default: LinkScrapPlugin } = await import("./tmp_build/main.mjs");
 
+const { draftHash, markerLine } = await import("../src/pending.js");
+
 const vault = new mock.Vault();
 await vault.createFolder("스크랩");
 await vault.createFolder("스크랩/AI");
 const opened = [];
-const app = {
-  vault,
-  metadataCache: {
-    // 테스트용: frontmatter의 url 줄만 읽는다
-    getFileCache: (f) => {
-      const m = typeof f.data === "string" && f.data.match(/^---\nurl: "?([^"\n]+)"?\n/);
-      return m ? { frontmatter: { url: m[1] } } : {};
-    },
-  },
-  workspace: { getLeaf: () => ({ openFile: async (f) => opened.push(f.path) }) },
-};
+const app = mock.makeApp(vault, opened);
 const plugin = new LinkScrapPlugin(app);
 await plugin.onload();
+const MARK = (words) => new RegExp(`^Claude: ${words} 확인 대기 \\([0-9a-f]{8}\\)$`, "m");
 
 // 1) 기본 스크랩 + 태그 + 폴더
 const f1 = await plugin.scrap("https://news.hada.io/topic?id=29185", "스크랩/AI", ["AI", "경제/고용"]);
@@ -77,4 +70,90 @@ console.log("4-1 자동 분류(빈 Vault → 최상위) OK:", mock.notices.at(-1
 // 5) 실패 시 알림
 await plugin.scrap("https://arca.live/b/aihomelab/185810092", "스크랩", []);
 console.log("5 실패 알림:", mock.notices.at(-1));
+
+// 6) 한국어 번역 (모의 환경은 모바일처럼 초안만): 제목·본문이 한국어, 이미지 주소는 그대로, 별칭 없음, Claude 확인 대기 표시
+const f6 = await plugin.scrap("https://paulgraham.com/weird.html", "스크랩", [], { translate: true, summary: false });
+assert.equal(f6.path, "스크랩/이상한 언어.md");
+assert.match(f6.data, /^# 이상한 언어\n/m);
+assert.ok(f6.data.includes("](https://s.turbifycdn.com/aah/paulgraham/weird-languages-5.gif)"), "이미지 주소가 번역되면 안 됨");
+assert.ok(!/^aliases:/m.test(f6.data) && !f6.data.includes("⟦"));
+assert.match(f6.data, MARK("번역"));
+assert.match(mock.notices.at(-1), /PC 옵시디언에서 Claude가 마무리합니다/);
+console.log("6 번역 초안 OK:", f6.data.match(MARK("번역"))[0]);
+
+// 7) 원문 그대로 + 외국어 제목 → 한국어 별칭 (구글 번역이라 별칭만 확인 대기)
+const f7 = await plugin.scrap("https://www.4gamer.net/games/898/G089833/20251205029/", "스크랩", []);
+assert.match(f7.data, /^---\nurl: \S+\naliases:\n  - ".*[가-힯].*"\n/);
+assert.match(f7.data, /^# ［インタビュー］/m);
+assert.match(f7.data, MARK("별칭"));
+console.log("7 원문+별칭 OK:", f7.data.match(/aliases:\n  - (.*)/)[1]);
+
+// 8) 한국어 기사 요약 + 번역 요청: 번역은 건너뛰고 핵심 문장 목록, 알림에 알려 줌
+const f8 = await plugin.scrap("https://www.yna.co.kr/view/AKR20260708118151008", "스크랩", [], { translate: true, summary: true });
+const bullets = f8.data.split("\n").filter((l) => l.startsWith("- "));
+assert.ok(bullets.length >= 3 && bullets.length <= 6, `요약 항목 ${bullets.length}개`);
+assert.ok(f8.data.length < 1500);
+assert.match(f8.data, MARK("요약"));
+console.log(`8 요약 OK: 항목 ${bullets.length}개 /`, mock.notices.at(-1).replace(/\n/g, " / "));
+
+// 9) 주소로 부르기: 번역+요약 (일본어 기사)
+await plugin.protocol({ action: "scrap", url: "https://www.famitsu.com/article/202607/82197", translate: "1", summary: "1" });
+await new Promise((r) => setTimeout(r, 15000));
+const f9 = [...vault.files.values()].find((f) => /famitsu/.test(f.data || "") && f.path.endsWith(".md"));
+assert.ok(f9 && /^# .*[가-힯]/m.test(f9.data), "한국어 제목으로 저장되어야 함");
+assert.ok(f9.data.split("\n").filter((l) => l.startsWith("- ")).length >= 3);
+assert.match(f9.data, MARK("번역·요약"));
+console.log("9 주소 호출 번역+요약 OK:", f9.path);
 console.log("열린 노트:", opened);
+
+// ---------- PC에서 Claude가 마무리 (가짜 Claude로 흐름만 검사, 실제 Claude는 plugin-desktop.mjs) ----------
+const calls = [];
+let fixedLine = "";
+const fakeClaude = async (prompt) => {
+  calls.push(prompt);
+  if (/제목을 한국어로 옮긴다/.test(prompt)) return "젤다 무쌍 봉인전기 인터뷰";
+  if (/요약한다/.test(prompt)) return "# 미야모토 시게루 인터뷰\n\n게임을 일상으로 만들고 싶다는 이야기다.\n\n- 첫째 항목이다.\n- 둘째 항목이다.\n- 셋째 항목이다.";
+  // 번역 확인: 자리표시 없는 첫 줄을 고친다 (원래 줄의 절반보다 짧으면 내용을 빠뜨린 것으로 보고 버리므로 길이는 비슷하게)
+  const item = [...prompt.matchAll(/^\[(\d+)\]\n원문: .*\n번역: (.*)$/gm)].find((m) => m[1] !== "0" && !m[2].includes("⟦"));
+  fixedLine = `${item[2]} (Claude가 고친 줄)`;
+  return `[0] 이상한 언어들\n[${item[1]}] ${fixedLine}\n[999] 없는 줄은 무시된다`;
+};
+plugin.claude = () => fakeClaude;
+
+// 10) 번역 초안 → 원문을 다시 받아 대조, 고친 줄 반영, 제목이 바뀌면 파일 이름도
+assert.equal(await plugin.finishNote(f6), "done");
+assert.equal(f6.path, "스크랩/이상한 언어들.md");
+assert.match(f6.data, /^# 이상한 언어들\n/m);
+assert.ok(f6.data.includes(fixedLine) && !/^Claude:/m.test(f6.data), f6.data.slice(0, 300));
+assert.ok(f6.data.includes("](https://s.turbifycdn.com/aah/paulgraham/weird-languages-5.gif)"));
+console.log("10 번역 마무리 OK:", f6.path);
+
+// 11) 별칭만 확인 대기 → 원문 다시 받지 않고 별칭만 바꾼다
+const before7 = f7.data;
+const afterFm = (s) => s.slice(s.indexOf("\n---\n", 4));
+assert.equal(await plugin.finishNote(f7), "done");
+assert.match(f7.data, /^---\nurl: \S+\naliases:\n  - "젤다 무쌍 봉인전기 인터뷰"\n/);
+assert.ok(!/^Claude:/m.test(f7.data));
+assert.equal(afterFm(f7.data), afterFm(before7), "본문은 그대로여야 함");
+console.log("11 별칭 마무리 OK");
+
+// 12) 휴대폰에서 고친 노트는 건너뛰고, '이 노트 Claude로 마무리'(force)는 덮어쓴다
+f9.data += "\n내 메모\n";
+assert.equal(await plugin.finishNote(f9), "edited");
+assert.match(f9.data, MARK("번역·요약"));
+assert.equal(await plugin.finishNote(f9, { force: true }), "done");
+assert.ok(!/내 메모|^Claude:/m.test(f9.data) && /^- 셋째 항목이다\.$/m.test(f9.data));
+console.log("12 고친 노트 건너뛰기/덮어쓰기 OK:", f9.path);
+
+// 13) Claude가 거절하면 표시만 지우고 내용은 그대로 둔다 (줄 처리 경로)
+const body13 = "본문이다.\n";
+const fm13 = { title: "Weird Languages", body: body13, aliases: ["이상한 언어"] };
+const f13 = await vault.create(
+  "스크랩/Weird Languages.md",
+  `---\nurl: https://paulgraham.com/weird.html\naliases:\n  - "이상한 언어"\n${markerLine({ alias: true }, draftHash(fm13, { alias: true }))}\n---\n# Weird Languages\n\n${body13}`
+);
+plugin.claude = () => async () => "No.";
+plugin.pending.add(f13.path);
+await plugin.runPending();
+assert.ok(!/^Claude:/m.test(f13.data) && f13.data.includes('  - "이상한 언어"'), f13.data);
+console.log("13 거절 시 표시만 지움 OK:", mock.notices.at(-1));

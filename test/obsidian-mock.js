@@ -10,10 +10,10 @@ globalThis.DOMParser = new JSDOM("").window.DOMParser;
 export const Platform = { isMobile: false, isDesktopApp: false };
 export const normalizePath = (p) => p.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
 export const htmlToMarkdown = (html) => td.turndown(html);
-export async function requestUrl({ url, headers = {} }) {
-  const res = await fetch(url, { headers });
+export async function requestUrl({ url, method = "GET", headers = {}, body, contentType }) {
+  const res = await fetch(url, { method, headers: contentType ? { ...headers, "Content-Type": contentType } : headers, body });
   const buf = await res.arrayBuffer();
-  return { status: res.status, headers: Object.fromEntries(res.headers), arrayBuffer: buf };
+  return { status: res.status, headers: Object.fromEntries(res.headers), arrayBuffer: buf, text: new TextDecoder().decode(buf) };
 }
 
 export const notices = (globalThis.__notices ??= []);
@@ -30,6 +30,9 @@ export const parseFrontMatterAliases = (fm) => {
 export class Notice {
   constructor(msg) {
     notices.push(msg);
+  }
+  setMessage() {
+    return this;
   }
   hide() {}
 }
@@ -78,6 +81,22 @@ export class Vault {
   async cachedRead(f) {
     return f.data;
   }
+  async read(f) {
+    return f.data;
+  }
+  async modify(f, text) {
+    f.data = text;
+  }
+  async process(f, fn) {
+    f.data = fn(f.data);
+    return f.data;
+  }
+  async rename(f, p) {
+    if (this.files.has(p)) throw new Error("exists " + p);
+    this.files.delete(f.path);
+    Object.assign(f, new TFile(p, f.data));
+    this.files.set(p, f);
+  }
   on() {
     return {};
   }
@@ -87,6 +106,47 @@ export class Vault {
   getMarkdownFiles() {
     return [...this.files.values()].filter((f) => f instanceof TFile && f.extension === "md");
   }
+}
+
+/** 테스트용 frontmatter 읽기: "키: 값"과 "키:\n  - 항목" 목록만 */
+export function readFrontmatter(text) {
+  const m = typeof text === "string" && text.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return null;
+  const fm = {};
+  let list = null;
+  for (const line of m[1].split("\n")) {
+    const item = line.match(/^\s+-\s*(.*)$/);
+    if (item && list) {
+      fm[list].push(item[1].replace(/^"(.*)"$/, "$1"));
+      continue;
+    }
+    const kv = line.match(/^([^:\s][^:]*):\s*(.*)$/);
+    if (!kv) continue;
+    list = kv[2] ? null : kv[1];
+    fm[kv[1]] = kv[2] ? kv[2].replace(/^"(.*)"$/, "$1") : [];
+  }
+  return fm;
+}
+
+/** 테스트용 앱: 메모리 Vault + frontmatter 캐시 + 이름 바꾸기 */
+export function makeApp(vault, opened = []) {
+  return {
+    vault,
+    metadataCache: {
+      getFileCache: (f) => {
+        const frontmatter = readFrontmatter(f.data);
+        return frontmatter ? { frontmatter } : {};
+      },
+      on: () => ({}),
+      fileToLinktext: (f) => f.basename,
+    },
+    fileManager: { renameFile: (f, p) => vault.rename(f, p) },
+    workspace: {
+      getLeaf: () => ({ openFile: async (f) => opened.push(f.path) }),
+      onLayoutReady: () => {},
+      getActiveFile: () => null,
+    },
+  };
 }
 
 export class Plugin {
