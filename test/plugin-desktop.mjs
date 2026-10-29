@@ -35,7 +35,7 @@ const run = async (label, url, mode) => {
 // 전문 번역: 구글 번역 초안을 Claude가 원문과 대조해 고친다
 const a = await run("번역 전문", "https://paulgraham.com/weird.html", { translate: true, summary: false });
 assert.match(a.data, /^# .*[가-힯]/m);
-assert.ok(a.data.includes("](https://s.turbifycdn.com/aah/paulgraham/weird-languages-5.gif)"));
+assert.ok(!a.data.includes("weird-languages-5.gif"), "이미지는 빼야 함");
 assert.ok(!a.data.includes("⟦"));
 
 const b = await run("원문 요약", "https://www.yna.co.kr/view/AKR20260708118151008", { translate: false, summary: true });

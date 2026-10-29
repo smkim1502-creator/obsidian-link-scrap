@@ -81,8 +81,7 @@ buttonsOf(quick)[1].click();
 assert.ok(quick.contentEl.textContent.includes("https://example.com/b") && picked.summary && !picked.translate);
 console.log("2-1 저장 형태 버튼 OK");
 
-// 3) 공유 단축어 주소 → 저장 형태 고르는 창 → 고르면 저장. 이미지 Vault 저장(디시 이미지), 자동 분류를 끄면 마지막 폴더로 간다
-plugin.settings.saveImages = true;
+// 3) 공유 단축어 주소 → 저장 형태 고르는 창 → 고르면 저장. 이미지 없이 글만(디시 글은 이미지가 많다), 자동 분류를 끄면 마지막 폴더로 간다
 plugin.settings.autoFolder = false;
 const nFiles = vault.files.size;
 await plugin.protocol({ action: "scrap", url: "디시 글 https://m.dcinside.com/board/thesingularity/1407506", tags: "AI" });
@@ -92,13 +91,29 @@ assert.equal(vault.files.size, nFiles, "고르기 전에는 저장하지 않아�
 await chooser.pick({ translate: false, summary: false });
 const f3 = [...vault.files.values()].find((f) => f.path === "스크랩/AI/AI 수학 발전의 역사.md");
 assert.ok(f3, "디시 글 노트가 마지막 폴더(스크랩/AI)에 저장되어야 함");
-const imgs = [...vault.files.keys()].filter((p) => p.startsWith("_resources/스크랩/AI 수학 발전의 역사/"));
-assert.ok(imgs.length > 0, "이미지가 저장되어야 함");
-assert.ok(!/dcimg/.test(f3.data), "원격 이미지 주소가 남으면 안 됨");
-console.log(`3 공유 주소→형태 고르기→저장+이미지 OK: 이미지 ${imgs.length}개`, imgs.slice(0, 2));
+assert.ok(!/!\[|<img|dcimg/i.test(f3.data), "이미지가 남으면 안 됨");
+assert.ok(![...vault.files.keys()].some((p) => p.startsWith("_resources/")), "이미지 파일을 받으면 안 됨");
+assert.ok(f3.data.split("\n# ")[1].length > 200, "글은 남아 있어야 함");
+console.log("3 공유 주소→형태 고르기→글만 저장 OK");
 console.log(f3.data.slice(0, 300));
-plugin.settings.saveImages = false;
 plugin.settings.autoFolder = true;
+
+// 3-1) 이미지 빼기: 링크 걸린 이미지·이미지만 있는 목록 줄·HTML 이미지는 빼고, 글과 코드 블록 안은 그대로
+const { stripImages } = await import("./tmp_build/main.mjs");
+assert.equal(
+  stripImages("앞 문단\n\n![사진](https://x/a.jpg)\n\n[![画像](https://x/b.png)](https://x/b)\n- ![](https://x/c.gif)\n> ![[로컬.png]]\n글 ![아이콘](https://x/i.png) 중간 <img src=\"x\">끝\n\n```\n![코드 속](x)\n```\n"),
+  "앞 문단\n\n글  중간 끝\n\n```\n![코드 속](x)\n```\n"
+);
+// 사진 설명: 연합뉴스(이미지 확대 + 굵은 사진 제목 + 이메일로 끝나는 설명), 네이버(기울임꼴 설명). 기사 첫 문단은 남긴다
+assert.equal(
+  stripImages("## 소제목\n\n__이미지 확대__ ![코스피](https://x/p.jpg)\n\n**코스피, 5% 급락**\n\n(서울=연합뉴스) 이진욱 기자 = 홍보관 모습. 2026.7.8 cityboy@yna.co.kr\n\n(서울=연합뉴스) 임은진 기자 = 코스피가 급락했다.\n"),
+  "## 소제목\n\n(서울=연합뉴스) 임은진 기자 = 코스피가 급락했다.\n"
+);
+assert.equal(
+  stripImages("![사진은 기사와 관련 없음  /게티이미지뱅크](https://x/a.jpg)\n\n_사진은 기사와 관련 없음 /게티이미지뱅크_\n\n“요즘 손님들은 다르다.”\n\n_강조한 문장도 본문이면 남는다_\n"),
+  "“요즘 손님들은 다르다.”\n\n_강조한 문장도 본문이면 남는다_\n"
+);
+console.log("3-1 이미지·사진 설명 빼기 OK");
 
 // 4) PDF
 const f4 = await plugin.scrap("https://www.nintendo.co.jp/ir/pdf/2026/qa2606.pdf", "스크랩", []);
@@ -119,7 +134,7 @@ console.log("5 실패 알림:", mock.notices.at(-1));
 const f6 = await plugin.scrap("https://paulgraham.com/weird.html", "스크랩", [], { translate: true, summary: false });
 assert.equal(f6.path, "스크랩/이상한 언어.md");
 assert.match(f6.data, /^# 이상한 언어\n/m);
-assert.ok(f6.data.includes("](https://s.turbifycdn.com/aah/paulgraham/weird-languages-5.gif)"), "이미지 주소가 번역되면 안 됨");
+assert.ok(!f6.data.includes("weird-languages-5.gif"), "이미지는 빼야 함");
 assert.ok(!/^aliases:/m.test(f6.data) && !f6.data.includes("⟦"));
 assert.match(f6.data, MARK("번역"));
 assert.match(mock.notices.at(-1), /PC 옵시디언에서 Claude가 마무리합니다/);
@@ -169,7 +184,7 @@ assert.equal(await plugin.finishNote(f6), "done");
 assert.equal(f6.path, "스크랩/이상한 언어들.md");
 assert.match(f6.data, /^# 이상한 언어들\n/m);
 assert.ok(f6.data.includes(fixedLine) && !/^Claude:/m.test(f6.data), f6.data.slice(0, 300));
-assert.ok(f6.data.includes("](https://s.turbifycdn.com/aah/paulgraham/weird-languages-5.gif)"));
+assert.ok(!f6.data.includes("weird-languages-5.gif"));
 console.log("10 번역 마무리 OK:", f6.path);
 
 // 11) 별칭만 확인 대기 → 원문 다시 받지 않고 별칭만 바꾼다

@@ -315,18 +315,13 @@ export function keySentences(title, markdown, { max = 6 } = {}) {
   return picked.sort((a, b) => a - b).map((i) => sents[i]);
 }
 
-// 요약 맨 위에 둘 대표 이미지 (본문의 첫 이미지 줄)
-export function leadImage(markdown) {
-  const m = markdown.match(/^[ \t]*(!\[[^\]]*\]\([^)]+\)|!\[\[[^\]]+\]\])[ \t]*$/m);
-  return m ? m[1] + "\n\n" : "";
-}
-
+// 요약 노트에는 이미지를 넣지 않는다 (사용자 요청, 1.3.2)
 async function localSummary({ title, markdown }, translate, post) {
   const sents = keySentences(title, markdown);
   let t = title;
   let lines = sents;
   if (translate) [t, ...lines] = await googleTranslate([title, ...sents], post);
-  return { title: t.trim() || title, markdown: leadImage(markdown) + lines.map((s) => `- ${s.trim()}`).join("\n") + "\n" };
+  return { title: t.trim() || title, markdown: lines.map((s) => `- ${s.trim()}`).join("\n") + "\n" };
 }
 
 // ---------- Claude Code ----------
@@ -597,7 +592,7 @@ export async function googleTitle(title, post) {
 // ---------- 진입점 ----------
 
 /**
- * 초안을 Claude로 마무리한다. 요약은 원문을 읽고 새로 쓰고(초안의 대표 이미지는 살린다), 번역은 구글 번역 초안의 고칠 줄만 고친다.
+ * 초안을 Claude로 마무리한다. 요약은 원문을 읽고 새로 쓰고(이미지는 넣지 않는다), 번역은 구글 번역 초안의 고칠 줄만 고친다.
  * @param {{title:string, markdown:string}} a  원문
  * @param {null | {title:string, markdown:string}} draft  초안 (요약은 없어도 된다)
  * @param {{translate:boolean, summary:boolean}} jobs
@@ -606,7 +601,7 @@ export async function googleTitle(title, post) {
 export async function finishDraft(a, draft, jobs, runClaude, opts = {}) {
   if (jobs.summary) {
     const r = await claudeSummary(a, jobs.translate, runClaude);
-    return { title: r.title, markdown: (leadImage(draft ? draft.markdown : "") || leadImage(a.markdown)) + r.markdown };
+    return { title: r.title, markdown: r.markdown };
   }
   return claudeReview(a, draft, runClaude, opts);
 }

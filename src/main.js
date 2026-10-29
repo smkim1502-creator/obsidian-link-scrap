@@ -27,8 +27,6 @@ const AUTO_FOLDER = "__auto__";
 const DEFAULT_SETTINGS = {
   rootFolder: "스크랩",
   lastFolder: "스크랩",
-  saveImages: false,
-  imageFolder: "_resources/스크랩",
   openAfter: true,
   autoFolder: true,
   autoTags: true,
@@ -122,15 +120,60 @@ function yamlValue(v) {
   return risky ? JSON.stringify(v) : v;
 }
 
-function sniffImageExt(bytes, contentType, url) {
-  const b = new Uint8Array(bytes.slice(0, 12));
-  if (b[0] === 0xff && b[1] === 0xd8) return "jpg";
-  if (b[0] === 0x89 && b[1] === 0x50) return "png";
-  if (b[0] === 0x47 && b[1] === 0x49) return "gif";
-  if (b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return "webp";
-  const t = (contentType.match(/image\/(\w+)/) || [])[1];
-  if (t) return t === "jpeg" ? "jpg" : t === "svg" ? "svg" : t;
-  return (url.match(/\.(jpe?g|png|gif|webp|avif|svg)(\?|$)/i) || [, "jpg"])[1].toLowerCase();
+/**
+ * 본문에서 이미지를 뺀다: ![설명](주소), 링크 걸린 이미지 [![…](…)](…), ![[…]], <img>.
+ * 이미지만 있던 줄은 없애고 빈 줄은 하나로 줄인다. 코드 블록 안은 건드리지 않는다
+ */
+export function stripImages(md) {
+  const IMG = /\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)|!\[\[[^\]]+\]\]|<img\b[^>]*>/gi;
+  // 이미지에 딸린 글: 「이미지 확대」 단추 글자, 뉴스 사진 설명(이메일로 끝나는 줄)과 그 앞의 굵은 사진 제목
+  const ZOOM = /^[ \t]*(\*\*|__)?[ \t]*(이미지|사진|그래픽|영상)[ \t]?확대[ \t]*(\*\*|__)?[ \t]*$/;
+  const CAPTION = /[\w.-]+@[\w-]+\.[\w.]+[ \t]*$/;
+  const BOLD_TITLE = /^[ \t]*(\*\*|__)[^*_\n]{1,80}(\*\*|__)[ \t]*$/;
+  // 네이버 뉴스처럼 이미지 바로 아래 기울임꼴로 단 사진 설명 (_사진=… 기자_)
+  const ITALIC = /^[ \t]*(_|\*)(?!\1)[^\n]{1,100}[^*_\s]\1[ \t]*$/;
+  const plain = (s) => s.replace(/[*_\\]/g, "").replace(/\s+/g, " ").trim();
+  const lines = md.split("\n");
+  const out = [];
+  let fence = null;
+  let afterImage = 0; // 이미지 바로 뒤 몇 줄까지 사진 설명을 찾을지
+  let alts = []; // 방금 뺀 이미지의 설명 글
+  const next = (i) => {
+    for (let j = i + 1; j < lines.length; j++) if (lines[j].trim()) return lines[j];
+    return "";
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const f = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence || f) {
+      if (fence && f && f[1][0] === fence) fence = null;
+      else if (!fence) fence = f[1][0];
+      out.push(line);
+      continue;
+    }
+    if (ZOOM.test(line)) continue;
+    if (IMG.test(line)) {
+      IMG.lastIndex = 0;
+      alts = [...line.matchAll(/!\[([^\]]+)\]/g)].map((m) => plain(m[1])).filter(Boolean);
+      const rest = line.replace(IMG, "").replace(/[ \t]+$/, "");
+      // 이미지만 있던 줄(목록·인용 기호나 「이미지 확대」만 남는 줄 포함)은 통째로 뺀다
+      if (rest.replace(/^[ \t]*(?:[-*+]|\d+[.)]|>)?[ \t]*/, "") && !ZOOM.test(rest)) out.push(rest);
+      afterImage = 3;
+      continue;
+    }
+    if (!line.trim()) {
+      out.push(line);
+      continue;
+    }
+    if (afterImage > 0) {
+      afterImage--;
+      if (CAPTION.test(line) || ITALIC.test(line) || alts.includes(plain(line))) continue;
+      if (BOLD_TITLE.test(line) && CAPTION.test(next(i))) continue;
+      afterImage = 0;
+    }
+    out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
 }
 
 export default class LinkScrapPlugin extends Plugin {
@@ -378,7 +421,7 @@ export default class LinkScrapPlugin extends Plugin {
     if (note.jobs.translate || note.jobs.summary) {
       if (!note.url) throw new ClaudeRefused("url이 없습니다");
       say("원문을 다시 가져오는 중…");
-      const r = await scrapUrl(note.url, io); // 네트워크 오류는 그대로 던져 다음에 다시 시도
+      const r = await this.fetchArticle(note.url); // 네트워크 오류는 그대로 던져 다음에 다시 시도
       if (r.kind !== "article" || r.fallback) throw new ClaudeRefused("원문 본문을 찾지 못했습니다");
       say(note.jobs.summary ? "Claude가 요약하는 중…" : "Claude가 번역을 확인하는 중…");
       const progress = (d, n) => n > 1 && say(`Claude가 번역을 확인하는 중… (${d}/${n})`);
@@ -489,25 +532,11 @@ export default class LinkScrapPlugin extends Plugin {
     return p;
   }
 
-  async downloadImages(markdown, noteName) {
-    const folder = normalizePath(`${this.settings.imageFolder}/${noteName}`);
-    const urls = [...new Set([...markdown.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g)].map((m) => m[1]))];
-    if (!urls.length) return markdown;
-    await this.ensureFolder(this.settings.imageFolder);
-    await this.ensureFolder(folder);
-    let n = 0;
-    for (const url of urls) {
-      try {
-        const res = await requestUrl({ url, headers: { Referer: url }, throw: false });
-        if (res.status >= 400 || !res.arrayBuffer.byteLength) continue;
-        const ctype = Object.entries(res.headers || {}).find(([k]) => k.toLowerCase() === "content-type")?.[1] || "";
-        const path = this.uniquePath(folder, String(++n).padStart(2, "0"), sniffImageExt(res.arrayBuffer, ctype, url));
-        await this.app.vault.createBinary(path, res.arrayBuffer);
-        // ![설명](원격주소) → ![[Vault 경로]] (기존 노트들과 같은 임베드 형식)
-        markdown = markdown.replace(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g, (m, u) => (u === url ? `![[${path}]]` : m));
-      } catch {}
-    }
-    return markdown;
+  // 글을 가져온다. 스크랩에는 이미지 없이 글만 담는다 (사용자 요청, 1.3.2)
+  async fetchArticle(url) {
+    const r = await scrapUrl(url, io);
+    if (r.kind === "article") r.markdown = stripImages(r.markdown || "");
+    return r;
   }
 
   /**
@@ -523,7 +552,7 @@ export default class LinkScrapPlugin extends Plugin {
 
     const notice = new Notice("스크랩 중…", 0);
     try {
-      const r = await scrapUrl(url, io);
+      const r = await this.fetchArticle(url);
       let title = r.title;
       let markdown = r.markdown || "";
       // 폴더·태그·관련 노트 비교에 쓸 글. 한국어로 옮겼으면 그쪽이 내 노트와 비교하기 좋다
@@ -563,7 +592,7 @@ export default class LinkScrapPlugin extends Plugin {
         await this.app.vault.createBinary(pdfPath, r.body);
         body = `![[${pdfPath.split("/").pop()}]]\n`;
       } else {
-        body = this.settings.saveImages ? await this.downloadImages(markdown, name) : markdown;
+        body = markdown;
       }
 
       const sug = await this.autoSuggest(title, matchText, folder);
@@ -728,14 +757,6 @@ class LinkScrapSettingTab extends PluginSettingTab {
       .setName("스크랩 최상위 폴더")
       .setDesc("이 폴더와 하위 폴더가 입력창의 폴더 목록에 나옵니다.")
       .addText((t) => t.setValue(s.rootFolder).onChange((v) => ((s.rootFolder = v.trim() || "스크랩"), save())));
-    new Setting(containerEl)
-      .setName("이미지를 Vault에 저장")
-      .setDesc("끄면 원본 사이트의 이미지 주소를 그대로 씁니다(원본이 지워지면 이미지도 사라짐).")
-      .addToggle((t) => t.setValue(s.saveImages).onChange((v) => ((s.saveImages = v), save())));
-    new Setting(containerEl)
-      .setName("이미지 저장 폴더")
-      .setDesc("노트 제목별 하위 폴더에 저장합니다.")
-      .addText((t) => t.setValue(s.imageFolder).onChange((v) => ((s.imageFolder = v.trim() || "_resources/스크랩"), save())));
     new Setting(containerEl)
       .setName("스크랩 후 노트 열기")
       .addToggle((t) => t.setValue(s.openAfter).onChange((v) => ((s.openAfter = v), save())));
