@@ -142,6 +142,7 @@ export function makeApp(vault, opened = []) {
     },
     fileManager: { renameFile: (f, p) => vault.rename(f, p) },
     workspace: {
+      layoutReady: true,
       getLeaf: () => ({ openFile: async (f) => opened.push(f.path) }),
       onLayoutReady: () => {},
       getActiveFile: () => null,
@@ -168,6 +169,74 @@ export class Plugin {
   addSettingTab() {}
   registerEvent() {}
 }
-export class Modal {}
+// ---------- 화면: jsdom 요소에 옵시디언이 붙여 주는 도우미(createDiv 등)를 단다 ----------
+const win = new JSDOM("").window;
+globalThis.HTMLInputElement = win.HTMLInputElement;
+function helpers(e) {
+  e.createEl = (tag, o = {}) => {
+    const c = helpers(win.document.createElement(tag));
+    if (o.text) c.textContent = o.text;
+    e.appendChild(c);
+    return c;
+  };
+  e.createDiv = (o = {}) => e.createEl("div", o);
+  e.empty = () => (e.innerHTML = "");
+  e.setText = (t) => (e.textContent = t);
+  e.toggleClass = (c, on) => e.classList.toggle(c, on);
+  return e;
+}
+export const el = (tag = "div") => helpers(win.document.createElement(tag));
+
+// 띄운 창은 목록에 넣기만 한다. 테스트에서 onOpen()으로 그려 보거나 pick을 직접 부른다
+export const modals = (globalThis.__modals ??= []);
+export class Modal {
+  constructor(app) {
+    this.app = app;
+    this.contentEl = el();
+    this.titleEl = el();
+  }
+  open() {
+    modals.push(this);
+  }
+  close() {
+    this.closed = true;
+  }
+}
 export class PluginSettingTab {}
-export class Setting {}
+export class Setting {
+  constructor(parent) {
+    this.settingEl = parent.createDiv();
+    this.controlEl = this.settingEl.createDiv();
+  }
+  setName(n) {
+    this.settingEl.dataset.name = n;
+    return this;
+  }
+  setDesc() {
+    return this;
+  }
+  setHeading() {
+    return this;
+  }
+  addText(cb) {
+    const input = this.controlEl.createEl("input");
+    const t = {
+      inputEl: input,
+      setPlaceholder: () => t,
+      setValue: (v) => ((input.value = v), t),
+      onChange: (f) => (input.addEventListener("input", () => f(input.value)), t),
+    };
+    cb(t);
+    return this;
+  }
+  addDropdown(cb) {
+    const s = this.controlEl.createEl("select");
+    const d = {
+      addOption: (v, l) => ((s.createEl("option", { text: l }).value = v), d),
+      setValue: (v) => ((s.value = v), d),
+      onChange: (f) => (s.addEventListener("change", () => f(s.value)), d),
+    };
+    cb(d);
+    return this;
+  }
+}

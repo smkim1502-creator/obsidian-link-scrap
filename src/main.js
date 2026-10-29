@@ -32,13 +32,11 @@ const DEFAULT_SETTINGS = {
   openAfter: true,
   autoFolder: true,
   autoTags: true,
-  autoLinks: true,
+  // 관련 노트 링크는 기본으로 달지 않는다 (사용자가 옵시디언을 정리할 때 한꺼번에 한다)
+  autoLinks: false,
   maxRelated: 3,
   // 비교 대상에서 아예 뺄 폴더 (작업 기록 등)
   excludeFolders: "클로드 코드 프로젝트, 해결해야 할 문제",
-  // 번역·요약: 입력창과 '클립보드 링크 바로 스크랩'의 기본 형태
-  defaultTranslate: false,
-  defaultSummary: false,
   // Claude로 마무리: PC는 설치된 Claude Code(구독 계정)로 구글 번역을 확인하고 요약을 쓴다.
   // 모바일은 초안에 "Claude 확인 대기" 표시를 달아, PC 옵시디언이 동기화로 받으면 마무리하게 한다
   claude: true,
@@ -46,7 +44,17 @@ const DEFAULT_SETTINGS = {
   claudePath: "",
   // 외국어 제목 노트에 한국어 제목을 별칭으로 단다
   koreanAlias: true,
+  // 저장된 설정의 판. 2: 관련 노트 링크를 한 번 끄고, 번역·요약 기본값을 없앴다 (1.3.1)
+  settingsVersion: 2,
 };
+
+// 저장 형태 네 가지. 스크랩할 때마다 이 중에서 고른다 (기본값 없음)
+const MODES = [
+  ["원문 · 전문", { translate: false, summary: false }],
+  ["원문 · 요약", { translate: false, summary: true }],
+  ["번역 · 전문", { translate: true, summary: false }],
+  ["번역 · 요약", { translate: true, summary: true }],
+];
 
 const splitList = (s) => (s || "").split(",").map((x) => x.trim().replace(/^\/+|\/+$/g, "")).filter(Boolean);
 const inFolders = (path, folders) => folders.some((f) => path === f || path.startsWith(f + "/"));
@@ -127,29 +135,39 @@ function sniffImageExt(bytes, contentType, url) {
 
 export default class LinkScrapPlugin extends Plugin {
   async onload() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    // 1.3.1: 관련 노트 링크는 기본으로 끄고(전에 저장된 '켬'도 한 번 끈다), 번역·요약 기본값은 없앤다
+    if (saved && !(saved.settingsVersion >= 2)) {
+      this.settings.autoLinks = false;
+      for (const k of ["defaultTranslate", "defaultSummary", "engine"]) delete this.settings[k];
+      this.settings.settingsVersion = 2;
+      await this.saveData(this.settings);
+    }
 
     this.addRibbonIcon("newspaper", "링크 스크랩", () => this.openModal());
     this.addCommand({ id: "scrap-link", name: "링크 스크랩", callback: () => this.openModal() });
     this.addCommand({
       id: "scrap-clipboard",
-      name: "클립보드 링크 바로 스크랩",
+      name: "클립보드 링크 빠른 스크랩",
       callback: async () => {
         const url = findUrl(await this.readClipboard());
         if (!url) return new Notice("클립보드에 링크가 없습니다");
-        this.scrap(url, this.defaultFolder(), []);
+        this.chooseMode(url, this.defaultFolder(), []);
       },
     });
 
-    // obsidian://scrap?url=...&folder=...&tags=a,b&translate=1&summary=1  (모바일 공유 단축어용)
+    // obsidian://scrap?url=...&folder=...&tags=a,b  (모바일 공유 단축어용). 저장 형태를 고르는 창을 띄운다
+    // &translate=1&summary=1 처럼 형태를 주소에 적으면 묻지 않고 그대로 저장한다
     this.registerObsidianProtocolHandler("scrap", (params) => {
       const url = findUrl(params.url || params.text || "");
       if (!url) return this.openModal();
       const tags = (params.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       if (params.ask === "1" || params.ask === "true") return this.openModal(url);
-      const flag = (v, d) => (v === undefined ? d : v === "1" || v === "true");
-      const d = this.defaultMode();
-      this.scrap(url, params.folder || this.defaultFolder(), tags, { translate: flag(params.translate, d.translate), summary: flag(params.summary, d.summary) });
+      const folder = params.folder || this.defaultFolder();
+      if (params.translate === undefined && params.summary === undefined) return this.chooseMode(url, folder, tags);
+      const on = (v) => v === "1" || v === "true";
+      this.scrap(url, folder, tags, { translate: on(params.translate), summary: on(params.summary) });
     });
 
     this.addSettingTab(new LinkScrapSettingTab(this.app, this));
@@ -214,8 +232,15 @@ export default class LinkScrapPlugin extends Plugin {
     return this.settings.autoFolder ? AUTO_FOLDER : this.settings.lastFolder;
   }
 
-  defaultMode() {
-    return { translate: this.settings.defaultTranslate, summary: this.settings.defaultSummary };
+  // 앱을 막 켠 참이면(공유 단축어로 옵시디언이 열릴 때) 화면이 준비된 뒤에 창을 띄운다
+  whenReady(fn) {
+    if (this.app.workspace.layoutReady) fn();
+    else this.app.workspace.onLayoutReady(fn);
+  }
+
+  // 저장 형태(원문/번역 × 전문/요약)만 고르는 작은 창
+  chooseMode(url, folder, tags) {
+    this.whenReady(() => new ModeModal(this.app, this, url, folder, tags).open());
   }
 
   // PC에서 Claude Code로 마무리할 때만 실행기를 만든다 (모바일에는 Node가 없어 초안만 만든다)
@@ -428,7 +453,7 @@ export default class LinkScrapPlugin extends Plugin {
 
   async openModal(prefill) {
     const url = prefill || findUrl(await this.readClipboard()) || "";
-    new ScrapModal(this.app, this, url).open();
+    this.whenReady(() => new ScrapModal(this.app, this, url).open());
   }
 
   scrapFolders() {
@@ -488,7 +513,7 @@ export default class LinkScrapPlugin extends Plugin {
   /**
    * @param {{translate:boolean, summary:boolean}} mode  번역(한국어로) · 요약
    */
-  async scrap(url, folder, tags, mode = this.defaultMode()) {
+  async scrap(url, folder, tags, mode = MODES[0][1]) {
     const existing = this.findExisting(url);
     if (existing) {
       new Notice(`이미 스크랩한 글입니다: ${existing.basename}`);
@@ -592,21 +617,43 @@ export default class LinkScrapPlugin extends Plugin {
   }
 }
 
-// 둘 중 하나를 누르는 버튼 묶음 (원문|한국어 번역, 전문|요약)
-function addChoice(setting, options, value, onChange) {
-  const wrap = setting.controlEl.createDiv();
-  wrap.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;";
-  const buttons = options.map(([v, label]) => {
-    const b = wrap.createEl("button", { text: label });
-    b.addEventListener("click", () => {
-      value = v;
-      paint();
-      onChange(v);
-    });
-    return [v, b];
-  });
-  const paint = () => buttons.forEach(([v, b]) => b.toggleClass("mod-cta", v === value));
-  paint();
+// 저장 형태 버튼 네 개 (2×2). 누르면 바로 그 형태로 스크랩한다
+function addModeButtons(parent, onPick) {
+  const grid = parent.createDiv();
+  grid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;";
+  for (const [label, mode] of MODES) {
+    const b = grid.createEl("button", { text: label });
+    b.style.cssText = "width:100%;height:auto;padding:12px 8px;";
+    b.addEventListener("click", () => onPick({ ...mode }));
+  }
+  return grid;
+}
+
+// 공유 단축어·빠른 실행용: 링크는 이미 있으니 저장 형태만 고른다
+class ModeModal extends Modal {
+  constructor(app, plugin, url, folder, tags) {
+    super(app);
+    this.plugin = plugin;
+    this.url = url;
+    this.folder = folder;
+    this.tags = tags;
+  }
+
+  onOpen() {
+    this.titleEl.setText("저장 형태");
+    const link = this.contentEl.createDiv({ text: this.url });
+    link.style.cssText = "font-size:var(--font-ui-smaller);color:var(--text-muted);word-break:break-all;";
+    addModeButtons(this.contentEl, (mode) => this.pick(mode));
+  }
+
+  pick(mode) {
+    this.close();
+    return this.plugin.scrap(this.url, this.folder, this.tags, mode);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
 }
 
 class ScrapModal extends Modal {
@@ -617,7 +664,6 @@ class ScrapModal extends Modal {
     const last = plugin.defaultFolder();
     this.folder = last === AUTO_FOLDER || plugin.scrapFolders().includes(last) ? last : plugin.settings.rootFolder;
     this.tags = "";
-    this.mode = plugin.defaultMode();
   }
 
   onOpen() {
@@ -639,26 +685,26 @@ class ScrapModal extends Modal {
     new Setting(contentEl).setName("태그").setDesc(tagDesc).addText((t) =>
       t.setPlaceholder("AI, 경제/반도체").onChange((v) => (this.tags = v))
     );
-    addChoice(new Setting(contentEl).setName("언어"), [[false, "원문"], [true, "한국어 번역"]], this.mode.translate, (v) => (this.mode.translate = v));
-    addChoice(new Setting(contentEl).setName("분량"), [[false, "전문"], [true, "요약"]], this.mode.summary, (v) => (this.mode.summary = v));
-    new Setting(contentEl).addButton((b) => b.setButtonText("스크랩").setCta().onClick(() => this.submit()));
+    new Setting(contentEl).setName("저장 형태").setDesc("누르면 바로 스크랩합니다. 번역은 한국어로 옮기고, 한국어 글은 번역하지 않습니다.").setHeading();
+    addModeButtons(contentEl, (mode) => this.pick(mode));
 
+    // 저장 형태는 매번 직접 고르므로 Enter로는 저장하지 않는다
     contentEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) {
+      if (e.key === "Enter" && !e.isComposing && e.target instanceof HTMLInputElement) {
         e.preventDefault();
-        this.submit();
+        new Notice("아래에서 저장 형태를 눌러 주세요");
       }
     });
     // 모바일에서는 키보드가 화면을 가리지 않도록 자동 포커스하지 않는다
     if (!Platform.isMobile) setTimeout(() => urlInput.inputEl.focus(), 0);
   }
 
-  submit() {
+  pick(mode) {
     const url = findUrl(this.url);
     if (!url) return new Notice("올바른 링크를 넣어 주세요");
     const tags = this.tags.split(",").map((t) => t.trim()).filter(Boolean);
     this.close();
-    this.plugin.scrap(url, this.folder, tags, this.mode);
+    return this.plugin.scrap(url, this.folder, tags, mode);
   }
 
   onClose() {
@@ -697,7 +743,7 @@ class LinkScrapSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("자동 분류·태그·관련 노트").setHeading();
     new Setting(containerEl)
       .setName("폴더 자동 분류")
-      .setDesc("켜면 입력창의 기본값과 '클립보드 링크 바로 스크랩'이 내용과 사이트를 보고 하위 폴더(예: 스크랩/AI)를 고릅니다. 끄면 마지막에 고른 폴더에 저장합니다.")
+      .setDesc("켜면 입력창의 기본값과 '클립보드 링크 빠른 스크랩'·공유 단축어가 내용과 사이트를 보고 하위 폴더(예: 스크랩/AI)를 고릅니다. 끄면 마지막에 고른 폴더에 저장합니다.")
       .addToggle((t) => t.setValue(s.autoFolder).onChange((v) => ((s.autoFolder = v), save())));
     new Setting(containerEl)
       .setName("태그 자동으로 달기")
@@ -705,7 +751,7 @@ class LinkScrapSettingTab extends PluginSettingTab {
       .addToggle((t) => t.setValue(s.autoTags).onChange((v) => ((s.autoTags = v), save())));
     new Setting(containerEl)
       .setName("관련 노트 자동으로 링크")
-      .setDesc("내용이 비슷하거나 본문에 제목이 나오는 내 노트를 frontmatter 아래 '관련 노트:' 줄에 넣습니다. 스크랩 폴더의 노트끼리는 링크하지 않습니다.")
+      .setDesc("기본은 끔입니다. 켜면 내용이 비슷하거나 본문에 제목이 나오는 내 노트를 frontmatter 아래 '관련 노트:' 줄에 넣습니다. 스크랩 폴더의 노트끼리는 링크하지 않습니다.")
       .addToggle((t) => t.setValue(s.autoLinks).onChange((v) => ((s.autoLinks = v), save())));
     new Setting(containerEl)
       .setName("관련 노트 최대 개수")
@@ -720,22 +766,10 @@ class LinkScrapSettingTab extends PluginSettingTab {
         t.setValue(s.excludeFolders).onChange((v) => ((s.excludeFolders = v), (this.plugin.index = null), save()))
       );
 
-    new Setting(containerEl).setName("번역·요약").setHeading();
     new Setting(containerEl)
-      .setName("기본 언어")
-      .setDesc("입력창에서 처음 골라져 있는 값이자 '클립보드 링크 바로 스크랩'이 쓰는 값입니다. 한국어 글은 번역하지 않습니다.")
-      .addDropdown((d) =>
-        d.addOption("orig", "원문").addOption("ko", "한국어 번역")
-          .setValue(s.defaultTranslate ? "ko" : "orig")
-          .onChange((v) => ((s.defaultTranslate = v === "ko"), save()))
-      );
-    new Setting(containerEl)
-      .setName("기본 분량")
-      .addDropdown((d) =>
-        d.addOption("full", "전문").addOption("summary", "요약")
-          .setValue(s.defaultSummary ? "summary" : "full")
-          .onChange((v) => ((s.defaultSummary = v === "summary"), save()))
-      );
+      .setName("번역·요약")
+      .setDesc("원문/번역 × 전문/요약은 기본값 없이 스크랩할 때마다 고릅니다.")
+      .setHeading();
     new Setting(containerEl)
       .setName("외국어 제목에 한국어 별칭 달기")
       .setDesc("원문으로 저장한 외국어 글의 제목을 한국어로 옮겨 aliases에 넣습니다. 한국어로도 검색됩니다.")

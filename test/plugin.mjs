@@ -27,6 +27,24 @@ const plugin = new LinkScrapPlugin(app);
 await plugin.onload();
 const MARK = (words) => new RegExp(`^Claude: ${words} 확인 대기 \\([0-9a-f]{8}\\)$`, "m");
 
+// 0) 설정: 관련 노트 링크는 기본으로 끔. 예전에 저장된 '켬'과 번역·요약 기본값은 처음 켤 때 한 번 정리한다
+assert.equal(plugin.settings.autoLinks, false);
+const migrate = async (data) => {
+  const p = new LinkScrapPlugin(mock.makeApp(new mock.Vault()));
+  let written = null;
+  p.loadData = async () => data;
+  p.saveData = async (d) => (written = { ...d });
+  await p.onload();
+  return { settings: p.settings, written };
+};
+const old = await migrate({ autoLinks: true, maxRelated: 5, defaultTranslate: true, defaultSummary: false, engine: "claude" });
+assert.equal(old.settings.autoLinks, false);
+assert.equal(old.written.settingsVersion, 2);
+assert.ok(!("defaultTranslate" in old.written) && !("engine" in old.written) && old.written.maxRelated === 5);
+const kept = await migrate({ autoLinks: true, settingsVersion: 2 }); // 정리 뒤에 다시 켠 것은 그대로
+assert.ok(kept.settings.autoLinks === true && kept.written === null);
+console.log("0 설정 정리 OK");
+
 // 1) 기본 스크랩 + 태그 + 폴더
 const f1 = await plugin.scrap("https://news.hada.io/topic?id=29185", "스크랩/AI", ["AI", "경제/고용"]);
 assert.ok(f1, mock.notices.at(-1));
@@ -41,17 +59,43 @@ assert.equal(f2, f1);
 assert.equal(vault.files.size, before);
 console.log("2 중복 감지 OK:", mock.notices.at(-1));
 
-// 3) 프로토콜 핸들러 + 이미지 Vault 저장 (디시 이미지). 자동 분류를 끄면 마지막 폴더로 간다
+// 2-1) 창 그리기: 입력창과 빠른 고르기 창 모두 저장 형태 버튼 네 개, 누르면 그 형태로. 입력창에서 Enter로는 저장하지 않는다
+const buttonsOf = (m) => [...m.contentEl.querySelectorAll("button")];
+await plugin.openModal("https://example.com/a");
+const full = mock.modals.at(-1);
+full.onOpen();
+assert.equal(full.contentEl.querySelector("input").value, "https://example.com/a");
+assert.deepEqual(buttonsOf(full).map((b) => b.textContent), ["원문 · 전문", "원문 · 요약", "번역 · 전문", "번역 · 요약"]);
+let picked = null;
+full.pick = (m) => (picked = m);
+full.contentEl.querySelector("input").dispatchEvent(new full.contentEl.ownerDocument.defaultView.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+assert.equal(picked, null, "Enter로 저장하면 안 됨");
+assert.match(mock.notices.at(-1), /저장 형태를 눌러/);
+buttonsOf(full)[3].click();
+assert.deepEqual(picked, { translate: true, summary: true });
+plugin.chooseMode("https://example.com/b", "스크랩", []);
+const quick = mock.modals.at(-1);
+quick.onOpen();
+quick.pick = (m) => (picked = m);
+buttonsOf(quick)[1].click();
+assert.ok(quick.contentEl.textContent.includes("https://example.com/b") && picked.summary && !picked.translate);
+console.log("2-1 저장 형태 버튼 OK");
+
+// 3) 공유 단축어 주소 → 저장 형태 고르는 창 → 고르면 저장. 이미지 Vault 저장(디시 이미지), 자동 분류를 끄면 마지막 폴더로 간다
 plugin.settings.saveImages = true;
 plugin.settings.autoFolder = false;
+const nFiles = vault.files.size;
 await plugin.protocol({ action: "scrap", url: "디시 글 https://m.dcinside.com/board/thesingularity/1407506", tags: "AI" });
-await new Promise((r) => setTimeout(r, 15000));
+const chooser = mock.modals.at(-1);
+assert.ok(chooser && chooser.url === "https://m.dcinside.com/board/thesingularity/1407506" && chooser.folder === "스크랩/AI");
+assert.equal(vault.files.size, nFiles, "고르기 전에는 저장하지 않아야 함");
+await chooser.pick({ translate: false, summary: false });
 const f3 = [...vault.files.values()].find((f) => f.path === "스크랩/AI/AI 수학 발전의 역사.md");
 assert.ok(f3, "디시 글 노트가 마지막 폴더(스크랩/AI)에 저장되어야 함");
 const imgs = [...vault.files.keys()].filter((p) => p.startsWith("_resources/스크랩/AI 수학 발전의 역사/"));
 assert.ok(imgs.length > 0, "이미지가 저장되어야 함");
 assert.ok(!/dcimg/.test(f3.data), "원격 이미지 주소가 남으면 안 됨");
-console.log(`3 프로토콜+이미지 저장 OK: 이미지 ${imgs.length}개`, imgs.slice(0, 2));
+console.log(`3 공유 주소→형태 고르기→저장+이미지 OK: 이미지 ${imgs.length}개`, imgs.slice(0, 2));
 console.log(f3.data.slice(0, 300));
 plugin.settings.saveImages = false;
 plugin.settings.autoFolder = true;
