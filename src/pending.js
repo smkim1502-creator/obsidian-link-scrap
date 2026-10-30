@@ -99,9 +99,13 @@ export function parseNote(text) {
   };
 }
 
-/** 표시를 지우고 별칭을 바꿔 노트를 다시 만든다 */
-export function buildNote(note, { title, body, aliases }) {
-  const fm = note.fm.filter((l) => !LINE.test(l));
+/** frontmatter에 남길 결과 줄: Claude: "번역 확인 완료 · 2026-10-30 14:20 · 42줄 중 12줄 고침" */
+export const statusLine = (text) => `${KEY}: ${JSON.stringify(text)}`;
+
+/** 표시를 지우고(status가 있으면 그 결과 줄로 바꾸고) 별칭을 바꿔 노트를 다시 만든다 */
+export function buildNote(note, { title, body, aliases, status }) {
+  const fm = note.fm.filter((l) => (status ? !l.startsWith(`${KEY}:`) : !LINE.test(l)));
+  if (status) fm.push(statusLine(status));
   if (aliases) {
     const lines = aliases.length ? ["aliases:", ...aliases.map((a) => `  - ${JSON.stringify(a)}`)] : [];
     const i = fm.findIndex((l) => /^aliases:/.test(l));

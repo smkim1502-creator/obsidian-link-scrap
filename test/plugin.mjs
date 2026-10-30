@@ -178,12 +178,29 @@ const fakeClaude = async (prompt) => {
   return `[0] 이상한 언어들\n[${item[1]}] ${fixedLine}\n[999] 없는 줄은 무시된다`;
 };
 plugin.claude = () => fakeClaude;
+// 확인 기록은 PC만 쓴다
+mock.Platform.isDesktopApp = true;
+const DONE = (head, tail = "") => new RegExp(`^Claude: "${head} · \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d${tail}"$`, "m");
+const logText = () => vault.getAbstractFileByPath("스크랩/Claude 확인 기록.md")?.data || "";
+const entryOf = (name) => logText().split(/\n(?=### )/).find((e) => e.startsWith("### ") && e.includes(`[[${name}]]`)) || "";
+
+// 9-1) 기록 노트 맨 위에 아직 확인 대기인 노트 목록
+await plugin.writeLog(null);
+const waiting = logText().split("## 기록")[0];
+assert.ok(waiting.includes("- [[이상한 언어]] — 번역 확인") && waiting.includes("— 별칭 확인") && waiting.includes("— 요약"), waiting);
+console.log("9-1 확인 대기 목록 OK");
 
 // 10) 번역 초안 → 원문을 다시 받아 대조, 고친 줄 반영, 제목이 바뀌면 파일 이름도
 assert.equal(await plugin.finishNote(f6), "done");
 assert.equal(f6.path, "스크랩/이상한 언어들.md");
 assert.match(f6.data, /^# 이상한 언어들\n/m);
-assert.ok(f6.data.includes(fixedLine) && !/^Claude:/m.test(f6.data), f6.data.slice(0, 300));
+assert.ok(f6.data.includes(fixedLine) && !/확인 대기/.test(f6.data), f6.data.slice(0, 300));
+// 노트에는 언제 확인했고 몇 줄 고쳤는지, 기록에는 고친 줄의 전후
+assert.match(f6.data, DONE("번역 확인 완료", " · \\d+줄 중 2줄 고침"));
+const e6 = entryOf("이상한 언어들");
+assert.match(e6, /^번역 확인 완료 · \d+줄 중 2줄 고침 · 대기 초안 마무리$/m);
+assert.ok(e6.includes("> [!example]- 고친 줄 2개") && e6.includes("> ~~이상한 언어~~\n> 이상한 언어들") && e6.includes(`> ${fixedLine.replace(/^[-#>\s]+/, "")}`), e6);
+assert.ok(!logText().split("## 기록")[0].includes("[[이상한 언어"), "마무리한 노트는 확인 대기 목록에서 빠져야 함");
 assert.ok(!f6.data.includes("weird-languages-5.gif"));
 console.log("10 번역 마무리 OK:", f6.path);
 
@@ -192,7 +209,8 @@ const before7 = f7.data;
 const afterFm = (s) => s.slice(s.indexOf("\n---\n", 4));
 assert.equal(await plugin.finishNote(f7), "done");
 assert.match(f7.data, /^---\nurl: \S+\naliases:\n  - "젤다 무쌍 봉인전기 인터뷰"\n/);
-assert.ok(!/^Claude:/m.test(f7.data));
+assert.match(f7.data, DONE("별칭 확인 완료"));
+assert.match(entryOf(f7.basename), /^- 별칭: .+ → 젤다 무쌍 봉인전기 인터뷰$/m);
 assert.equal(afterFm(f7.data), afterFm(before7), "본문은 그대로여야 함");
 console.log("11 별칭 마무리 OK");
 
@@ -201,7 +219,9 @@ f9.data += "\n내 메모\n";
 assert.equal(await plugin.finishNote(f9), "edited");
 assert.match(f9.data, MARK("번역·요약"));
 assert.equal(await plugin.finishNote(f9, { force: true }), "done");
-assert.ok(!/내 메모|^Claude:/m.test(f9.data) && /^- 셋째 항목이다\.$/m.test(f9.data));
+assert.ok(!/내 메모|확인 대기/m.test(f9.data) && /^- 셋째 항목이다\.$/m.test(f9.data));
+assert.match(f9.data, DONE("번역·요약 완료"));
+assert.ok(entryOf(f9.basename).includes("> [!example]- 바꾸기 전 초안"), entryOf(f9.basename));
 console.log("12 고친 노트 건너뛰기/덮어쓰기 OK:", f9.path);
 
 // 13) Claude가 거절하면 표시만 지우고 내용은 그대로 둔다 (줄 처리 경로)
@@ -214,5 +234,15 @@ const f13 = await vault.create(
 plugin.claude = () => async () => "No.";
 plugin.pending.add(f13.path);
 await plugin.runPending();
-assert.ok(!/^Claude:/m.test(f13.data) && f13.data.includes('  - "이상한 언어"'), f13.data);
+assert.ok(!/확인 대기/.test(f13.data) && f13.data.includes('  - "이상한 언어"'), f13.data);
+assert.match(f13.data, /^Claude: "별칭 확인 못 함 · .+"$/m);
+assert.match(entryOf("Weird Languages"), /^별칭 확인 못 함 · /m);
+// 휴대폰에서 고친 노트를 건너뛴 것도 기록에 남는다
+const f14 = await vault.create("스크랩/고친 초안.md", f9.data.replace(/^Claude: .*$/m, markerLine({ translate: true }, "00000000")));
+plugin.pending.add(f14.path);
+await plugin.runPending();
+assert.match(entryOf("고친 초안"), /^번역 확인 건너뜀 · /m);
+assert.ok(logText().split("## 기록")[0].includes("- [[고친 초안]] — 번역 확인"));
+mock.Platform.isDesktopApp = false;
+console.log(logText().slice(0, 1500));
 console.log("13 거절 시 표시만 지움 OK:", mock.notices.at(-1));

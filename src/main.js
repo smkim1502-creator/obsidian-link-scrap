@@ -19,7 +19,8 @@ import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
 import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused } from "./transform.js";
 import { claudeRunner, findClaude } from "./claude.js";
-import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote } from "./pending.js";
+import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine } from "./pending.js";
+import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
 
 // 입력창·명령에서 "내용을 보고 폴더 고르기"를 뜻하는 값
 const AUTO_FOLDER = "__auto__";
@@ -243,6 +244,8 @@ export default class LinkScrapPlugin extends Plugin {
       if (!this.scanPending(0)) new Notice("Claude 확인 대기 노트가 없습니다");
     });
     desktopCommand("finish-this", "이 노트 Claude로 마무리", () => this.finishActive());
+    // 휴대폰에서도 열어 Claude가 확인했는지, 무엇을 고쳤는지 본다
+    this.addCommand({ id: "open-claude-log", name: "Claude 확인 기록 열기", callback: () => this.openLog() });
   }
 
   onunload() {
@@ -253,7 +256,7 @@ export default class LinkScrapPlugin extends Plugin {
   async getIndex() {
     if (this.index) return this.index;
     const excluded = splitList(this.settings.excludeFolders);
-    const files = this.app.vault.getMarkdownFiles().filter((f) => !inFolders(f.path, excluded));
+    const files = this.app.vault.getMarkdownFiles().filter((f) => !inFolders(f.path, excluded) && f.path !== this.logPath());
     const notes = await Promise.all(
       files.map(async (f) => {
         const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
@@ -356,17 +359,22 @@ export default class LinkScrapPlugin extends Plugin {
         try {
           const res = await this.finishNote(file, { say: (m) => notice.setMessage(`「${name}」: ${m}`) });
           if (res === "done") done++;
-          if (res === "edited") new Notice(`「${name}」은 노트를 고친 흔적이 있어 Claude 확인을 건너뛰었습니다. 노트를 열고 명령 '이 노트 Claude로 마무리'를 실행하면 고친 내용 대신 Claude가 마무리한 내용으로 바뀝니다.`, 15000);
+          if (res === "edited") {
+            new Notice(`「${name}」은 노트를 고친 흔적이 있어 Claude 확인을 건너뛰었습니다. 노트를 열고 명령 '이 노트 Claude로 마무리'를 실행하면 고친 내용 대신 Claude가 마무리한 내용으로 바뀝니다.`, 15000);
+            await this.logFor(file, { kind: "skip" });
+          }
         } catch (e) {
           if (e.claudeDown) {
             // Claude Code가 실행되지 않으면 남은 노트도 안 되므로 멈추고, 다음에 옵시디언을 켜거나 명령을 실행할 때 다시 한다
             this.claudeDown = true;
             new Notice(`Claude Code를 실행하지 못해 확인 대기 노트 마무리를 멈췄습니다 (${e.message || e})`, 10000);
+            await this.logFor(file, { kind: "later", reason: `Claude Code를 실행하지 못함 (${e.message || e})` });
           } else if (e instanceof ClaudeRefused) {
-            await this.dropMarker(file);
+            await this.dropMarker(file, e.message);
             new Notice(`Claude가 「${name}」을 마무리하지 않아 지금 내용 그대로 둡니다 (${e.message})`, 10000);
           } else {
             new Notice(`「${name}」을 마무리하지 못했습니다. 다음에 다시 시도합니다 (${e.message || e})`, 10000);
+            await this.logFor(file, { kind: "later", reason: `${e.message || e}` });
           }
           console.error("[link-scrap] Claude 마무리 실패", path, e);
         } finally {
@@ -376,7 +384,7 @@ export default class LinkScrapPlugin extends Plugin {
     } finally {
       this.pendingBusy = false;
     }
-    if (done) new Notice(`Claude 확인 완료: ${done}개`);
+    if (done) new Notice(`Claude 확인 완료: ${done}개 — 고친 내용은 명령 'Claude 확인 기록 열기'에서 봅니다`, 8000);
   }
 
   async finishActive() {
@@ -388,7 +396,7 @@ export default class LinkScrapPlugin extends Plugin {
       const res = await this.finishNote(file, { force: true, say: (m) => notice.setMessage(m) });
       new Notice(res === "done" ? `Claude 확인 완료: ${file.basename}` : "마무리하는 사이에 노트가 바뀌어 저장하지 않았습니다");
     } catch (e) {
-      if (e instanceof ClaudeRefused) await this.dropMarker(file);
+      if (e instanceof ClaudeRefused) await this.dropMarker(file, e.message);
       new Notice(`마무리하지 못했습니다 (${e.message || e})`, 10000);
     } finally {
       notice.hide();
@@ -418,21 +426,25 @@ export default class LinkScrapPlugin extends Plugin {
     if (!force && draftHash(note, note.jobs) !== note.hash) return "edited";
 
     let { title, body, aliases } = note;
+    let r = {};
     if (note.jobs.translate || note.jobs.summary) {
       if (!note.url) throw new ClaudeRefused("url이 없습니다");
       say("원문을 다시 가져오는 중…");
-      const r = await this.fetchArticle(note.url); // 네트워크 오류는 그대로 던져 다음에 다시 시도
-      if (r.kind !== "article" || r.fallback) throw new ClaudeRefused("원문 본문을 찾지 못했습니다");
+      const a = await this.fetchArticle(note.url); // 네트워크 오류는 그대로 던져 다음에 다시 시도
+      if (a.kind !== "article" || a.fallback) throw new ClaudeRefused("원문 본문을 찾지 못했습니다");
       say(note.jobs.summary ? "Claude가 요약하는 중…" : "Claude가 번역을 확인하는 중…");
       const progress = (d, n) => n > 1 && say(`Claude가 번역을 확인하는 중… (${d}/${n})`);
-      ({ title, markdown: body } = await finishDraft(r, { title, markdown: body }, note.jobs, run, { progress }));
+      r = await finishDraft(a, { title, markdown: body }, note.jobs, run, { progress });
+      ({ title, markdown: body } = r);
     }
     if (note.jobs.alias && !isKorean(title)) {
       const t = await claudeTitle(title, run);
       aliases = t !== title ? [t] : [];
     }
 
-    const next = buildNote(note, { title, body, aliases: note.jobs.alias ? aliases : null });
+    const when = stamp();
+    const status = doneText(note.jobs, r, when);
+    const next = buildNote(note, { title, body, aliases: note.jobs.alias ? aliases : null, status });
     let wrote = false;
     // 마무리하는 사이에 노트를 고쳤으면 저장하지 않는다
     await this.app.vault.process(file, (cur) => {
@@ -447,15 +459,91 @@ export default class LinkScrapPlugin extends Plugin {
       const folder = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
       await this.app.fileManager.renameFile(file, this.uniquePath(folder, name, "md"));
     }
+    await this.logFor(file, {
+      kind: "done",
+      when,
+      jobs: note.jobs,
+      source: "대기 초안 마무리",
+      r,
+      draft: note.jobs.summary ? note.body : "",
+      alias: note.jobs.alias ? { before: note.aliases, after: aliases } : undefined,
+    });
     return "done";
   }
 
-  // Claude가 마무리하지 않기로 한 노트는 표시만 지운다 (지금 내용 그대로)
-  async dropMarker(file) {
+  // Claude가 마무리하지 않기로 한 노트는 표시를 "못 함"으로 바꾼다 (지금 내용 그대로)
+  async dropMarker(file, reason = "") {
+    const when = stamp();
+    let jobs = null;
     await this.app.vault.process(file, (cur) => {
       const note = parseNote(cur);
-      return note && note.jobs ? buildNote(note, { title: note.title, body: note.body, aliases: null }) : cur;
+      if (!note || !note.jobs) return cur;
+      jobs = note.jobs;
+      const status = [`${jobName(jobs)} 못 함`, when, reason].filter(Boolean).join(" · ");
+      return buildNote(note, { title: note.title, body: note.body, aliases: null, status });
     });
+    if (jobs) await this.logFor(file, { kind: "fail", when, jobs, reason: reason || "이유 없음" });
+  }
+
+  // ---------- Claude 확인 기록 ----------
+
+  logPath() {
+    return normalizePath(`${this.settings.rootFolder || "스크랩"}/${LOG_NAME}.md`);
+  }
+
+  // 아직 확인 대기인 노트 목록 (기록 노트 맨 위에 보여 준다)
+  // 메타데이터 캐시는 방금 쓴 노트를 늦게 반영하므로, 후보(캐시에 표시가 있는 노트 + 방금 다룬 노트)는 본문을 읽어 확인한다
+  async pendingList(touched) {
+    const files = this.app.vault.getMarkdownFiles().filter((f) => {
+      const v = this.app.metadataCache.getFileCache(f)?.frontmatter?.[KEY];
+      return typeof v === "string" && v.includes("확인 대기");
+    });
+    if (touched instanceof TFile && !files.includes(touched)) files.push(touched);
+    const out = [];
+    for (const f of files) {
+      const jobs = parseNote(await this.app.vault.read(f))?.jobs;
+      if (jobs) out.push({ link: `[[${this.app.metadataCache.fileToLinktext(f, this.logPath(), true)}]]`, job: jobName(jobs) });
+    }
+    return out;
+  }
+
+  /** 노트 하나의 기록을 남긴다. o.jobs가 없으면 노트의 확인 대기 표시에서 읽는다 */
+  async logFor(file, o) {
+    try {
+      let jobs = o.jobs;
+      if (!jobs) jobs = parseNote(await this.app.vault.read(file))?.jobs || { translate: true };
+      const link = `[[${this.app.metadataCache.fileToLinktext(file, this.logPath(), true)}]]`;
+      await this.writeLog(formatEntry({ when: stamp(), ...o, jobs, link }), file);
+    } catch (e) {
+      console.error("[link-scrap] 확인 기록 남기기 실패", e);
+    }
+  }
+
+  // 기록 노트는 PC만 쓴다 (휴대폰도 쓰면 동기화 충돌이 난다). 한 번에 하나씩 써서 동시에 마무리한 노트가 서로 덮어쓰지 않게 한다
+  writeLog(entry, touched) {
+    if (!Platform.isDesktopApp) return Promise.resolve();
+    this.logQueue = (this.logQueue || Promise.resolve()).then(async () => {
+      const path = this.logPath();
+      const pending = await this.pendingList(touched);
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) await this.app.vault.process(file, (cur) => buildLog(cur, entry, pending));
+      else {
+        await this.ensureFolder(path.slice(0, path.lastIndexOf("/")));
+        await this.app.vault.create(path, buildLog("", entry, pending));
+      }
+    }).catch((e) => console.error("[link-scrap] 확인 기록 쓰기 실패", e));
+    return this.logQueue;
+  }
+
+  async openLog() {
+    const path = this.logPath();
+    let file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      await this.writeLog(null);
+      file = this.app.vault.getAbstractFileByPath(path);
+    }
+    if (file instanceof TFile) await this.app.workspace.getLeaf(false).openFile(file);
+    else new Notice("아직 기록이 없습니다. PC 옵시디언에서 Claude가 처음 마무리하면 생깁니다");
   }
 
   // 내용을 보고 스크랩 하위 폴더를 고른다. 실패하면 최상위 폴더
@@ -562,6 +650,9 @@ export default class LinkScrapPlugin extends Plugin {
       const runClaude = this.claude();
       // 나중에 Claude가 마무리할 일 (초안으로 저장한 경우)
       const jobs = { translate: false, summary: false, alias: false };
+      // PC에서 Claude가 바로 마무리했거나 거절한 결과 (노트 표시와 기록에 남긴다)
+      let claudeDone = null;
+      let claudeFail = "";
       if (r.kind === "pdf" && (mode.translate || mode.summary)) remarks.push("PDF는 원문 그대로 저장했습니다");
       if (r.kind === "article" && (mode.translate || mode.summary)) {
         try {
@@ -572,6 +663,8 @@ export default class LinkScrapPlugin extends Plugin {
             if (t.warning) remarks.push(t.warning);
             // 미리보기만 있는 페이지는 PC에서 다시 받아도 본문이 없으므로 표시하지 않는다
             if (t.retry && !r.fallback) Object.assign(jobs, { translate: t.translated, summary: t.summarized });
+            if (t.done) claudeDone = { jobs: { translate: t.translated, summary: t.summarized }, r: t };
+            else if (runClaude && !t.retry && t.warning) claudeFail = t.warning.replace(/^Claude가 /, "");
           } else if (mode.translate && !r.fallback) {
             remarks.push("한국어 글이라 번역하지 않았습니다");
           }
@@ -610,7 +703,11 @@ export default class LinkScrapPlugin extends Plugin {
       if (tags.length) fm += `tags:\n${tags.map((t) => `  - ${yamlValue(t)}`).join("\n")}\n`;
       // 초안이면 PC의 Claude가 마무리하도록 표시한다 (지문: 그 뒤에 노트를 고쳤는지 알아보는 데 쓴다)
       const mark = this.settings.claude && hasJobs(jobs);
+      const when = stamp();
+      const failJobs = { translate: !!mode.translate, summary: !!mode.summary };
       if (mark) fm += markerLine(jobs, draftHash({ title, body, aliases }, jobs)) + "\n";
+      else if (claudeDone) fm += statusLine(doneText(claudeDone.jobs, claudeDone.r, when)) + "\n";
+      else if (claudeFail) fm += statusLine(`${jobName(failJobs)} 못 함 · ${when}`) + "\n";
       if (mark && (jobs.translate || jobs.summary)) {
         remarks.push(Platform.isDesktopApp ? "Claude 확인 대기로 표시해 두었습니다. 나중에 다시 마무리합니다" : "PC 옵시디언에서 Claude가 마무리합니다");
       }
@@ -623,6 +720,9 @@ export default class LinkScrapPlugin extends Plugin {
       const relatedLine = links.length ? `관련 노트: ${links.join(", ")}\n\n` : "";
       const file = await this.app.vault.create(notePath, `${fm}${relatedLine}# ${title}\n\n${body}`);
 
+      if (mark) await this.writeLog(null, file); // 확인 대기 목록만 새로
+      else if (claudeDone) await this.logFor(file, { kind: "done", when, jobs: claudeDone.jobs, source: "PC에서 스크랩하며 바로", r: claudeDone.r });
+      else if (claudeFail) await this.logFor(file, { kind: "fail", when, jobs: failJobs, reason: claudeFail });
       // 직접 고른 폴더만 기억한다 (자동 분류 결과는 다음 기본값이 되지 않게)
       if (!auto) {
         this.settings.lastFolder = folder;

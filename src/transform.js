@@ -549,27 +549,40 @@ export async function claudeReview(a, draft, runClaude, { progress } = {}) {
   }
   if (!answered) throw new ClaudeRefused(`번역을 확인하지 않았습니다: ${outs[0].trim().split("\n")[0].slice(0, 80)}`);
   let title = draft.title;
-  let n = 0;
-  for (const [k, v] of fixes) {
+  // 고친 줄의 전후(확인 기록에서 비교해 본다)와 받지 않은 고침 수
+  const changes = [];
+  let skipped = 0;
+  const shown = (line) => restore(line, pieces, []).trim();
+  for (const [k, v] of [...fixes].sort((x, y) => x[0] - y[0])) {
     if (k === 0) {
       const t = v.replace(/^#+\s*/, "").replace(/\*\*|__/g, "").trim();
-      if (t && !t.includes("⟦")) (title = t), n++;
+      if (t && !t.includes("⟦") && t !== title) {
+        changes.push({ before: title, after: t });
+        title = t;
+      }
       continue;
     }
     const i = ids[k - 1];
     if (i === undefined) continue;
     const old = lines[i];
     const fixed = old.match(MD_PREFIX)[0] + v.replace(MD_PREFIX, "");
+    if (fixed === old) continue;
     // 이미지·링크 자리가 빠졌거나, 고친 줄이 크게 줄었거나(내용을 빠뜨렸을 수 있다), 깨진 글자(�)가 섞였으면 구글 번역 그대로 둔다
-    if (placeholders(fixed) !== placeholders(old)) continue;
-    if (old.length > 40 && fixed.length < old.length * 0.5) continue;
-    if (fixed.includes("�") && !old.includes("�")) continue;
+    if (
+      placeholders(fixed) !== placeholders(old) ||
+      (old.length > 40 && fixed.length < old.length * 0.5) ||
+      (fixed.includes("�") && !old.includes("�"))
+    ) {
+      skipped++;
+      continue;
+    }
+    changes.push({ before: shown(old), after: shown(fixed) });
     lines[i] = fixed;
-    n++;
   }
   const body = restore(lines.join("\n"), pieces);
   if (body === null) throw new ClaudeRefused("번역을 되돌리지 못했습니다");
-  return { title, markdown: tidy(body), fixes: n, parts: groups.length, answered };
+  // total: 확인한 줄 수(제목 포함)
+  return { title, markdown: tidy(body), fixes: changes.length, total: ids.length + 1, changes, skipped, parts: groups.length, answered };
 }
 
 /** 제목 하나를 Claude로 한국어로 옮긴다 (외국어 제목 노트의 별칭용) */
@@ -601,7 +614,7 @@ export async function googleTitle(title, post) {
 export async function finishDraft(a, draft, jobs, runClaude, opts = {}) {
   if (jobs.summary) {
     const r = await claudeSummary(a, jobs.translate, runClaude);
-    return { title: r.title, markdown: r.markdown };
+    return { title: r.title, markdown: r.markdown, parts: 1, answered: 1 };
   }
   return claudeReview(a, draft, runClaude, opts);
 }
