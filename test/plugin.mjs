@@ -300,3 +300,45 @@ assert.ok(logText().split("## 기록")[0].includes("- [[고친 초안]] — 번�
 mock.Platform.isDesktopApp = false;
 console.log(logText().slice(0, 1500));
 console.log("13 거절 시 표시만 지움 OK:", mock.notices.at(-1));
+
+// 14) Remotely Save 자동 동기화 알림: 기본은 휴대폰·태블릿만, 문장 끝에 (링크 스크랩)
+{
+  const original = () => {};
+  const rs = { settings: { serviceType: "onedrive" }, isSyncing: false, updateLastSyncMsg: original };
+  const app2 = mock.makeApp(new mock.Vault());
+  app2.plugins = { plugins: { "remotely-save": rs } };
+  let ready = () => {};
+  app2.workspace.onLayoutReady = (fn) => (ready = fn);
+  const p = new LinkScrapPlugin(app2);
+  await p.onload();
+  assert.notEqual(rs.updateLastSyncMsg, original);
+  assert.equal(p.settings.syncNotice, "mobile");
+  const sync = (source) => {
+    rs.updateLastSyncMsg(source, "syncing", -1, -1);
+    rs.updateLastSyncMsg(source, "not_syncing", Date.now(), null);
+  };
+  const count = mock.notices.length;
+  sync("auto_once_init"); // PC에서는 조용
+  assert.equal(mock.notices.length, count);
+  mock.Platform.isMobile = true;
+  sync("auto_once_init");
+  assert.deepEqual(mock.notices.slice(count), ["1/2 Remotely Save starts running (onedrive) (링크 스크랩)", "2/2 Remotely Save finished! (링크 스크랩)"]);
+  sync("auto_sync_on_save");
+  assert.equal(mock.notices.at(-1), "2/2 Remotely Save finished! (링크 스크랩)");
+  assert.equal(mock.notices.length, count + 3);
+  p.settings.syncNotice = "off";
+  sync("auto");
+  assert.equal(mock.notices.length, count + 3);
+  mock.Platform.isMobile = false;
+  p.settings.syncNotice = "all";
+  sync("auto_sync_on_save");
+  assert.equal(mock.notices.length, count + 4);
+  // 화면이 준비되면 3초마다 다시 연결을 확인하고, 플러그인을 끄면 멈추고 원래 함수로 되돌린다
+  ready();
+  assert.ok(p.syncTimer);
+  p.onunload();
+  assert.equal(rs.updateLastSyncMsg, original);
+  sync("auto");
+  assert.equal(mock.notices.length, count + 4);
+}
+console.log("14 동기화 알림 OK:", mock.notices.at(-1));

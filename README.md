@@ -103,6 +103,23 @@ tags:
   3. 동작 `URL 열기`: `obsidian://scrap?url=`[URL 인코딩된 텍스트]
   → 사파리·앱에서 공유 → 단축어 이름 누르기 → 옵시디언에서 저장 형태 누르기
 
+## Remotely Save 자동 동기화 알림 — 1.6.0
+
+Remotely Save는 직접 누른 동기화에만 알림을 띄운다. 자동 동기화(앱을 켤 때·주기·저장 뒤)는 끝나도, 실패해도 조용해서 휴대폰에서는 내 수정이 올라갔는지 알 수 없다. 그 상태로 다른 기기에서 같은 노트를 고치면 한쪽 수정이 사라진다.
+
+이 플러그인이 자동 동기화의 시작·끝·실패를 Remotely Save와 같은 문장으로 띄우고 끝에 `(링크 스크랩)`을 붙인다.
+
+| 때 | 알림 |
+|------|------|
+| 앱을 켠 뒤 첫 동기화, 주기 동기화 | `1/2 Remotely Save starts running (onedrive) (링크 스크랩)` → `2/2 Remotely Save finished! (링크 스크랩)` |
+| 저장 뒤 동기화 | 끝났을 때만 `2/2 Remotely Save finished! (링크 스크랩)` |
+| 실패 (인증 만료, 연결 끊김, 변경 비율 보호 등) | Remotely Save의 오류 문장 + `(링크 스크랩)`, 10초 |
+| 직접 누른 동기화 | Remotely Save가 스스로 알리므로 띄우지 않는다 |
+
+- 기존 노트를 고칠 때: 앱을 열고 `2/2 … finished!`가 뜬 뒤에 고치고, 다 쓴 뒤 `2/2 … finished!`가 뜨면 나간다
+- 기본은 휴대폰·태블릿만. PC는 아래쪽 상태 표시줄에 이미 나온다. 설정 → 동기화 알림에서 모든 기기 / 끔으로 바꾼다
+- Remotely Save 0.5.25에서 확인. Remotely Save가 없거나 꺼져 있으면 아무 일도 하지 않는다 (`src/syncnotice.js`)
+
 ## 사이트별 처리
 
 | 사이트 | 처리 |
@@ -123,6 +140,7 @@ tags:
 - 스크랩 후 노트 열기 (기본 켬)
 - 태그 자동으로 달기 (기본 켬) / 관련 노트 자동으로 링크 (기본 끔. 1.3.1로 올리면 전에 켜 둔 것도 한 번 꺼진다), 관련 노트 최대 개수 (기본 3)
 - 비교에서 뺄 폴더 (기본 `클로드 코드 프로젝트, 해결해야 할 문제`)
+- Remotely Save 자동 동기화 알림 (기본 휴대폰·태블릿만 / 모든 기기 / 끔)
 - 번역·요약은 기본값 없음 — 스크랩할 때마다 저장 형태를 고른다
 - 외국어 제목에 한국어 별칭 달기 (기본 켬)
 - Claude로 마무리 (기본 켬) — PC: Claude Code로 번역 확인·요약·별칭, 휴대폰 초안 마무리. 휴대폰: 초안에 확인 대기 표시 달기
@@ -136,6 +154,7 @@ node test/run.mjs [url …]   # 실제 사이트로 추출 결과 확인 → tes
 node test/transform.mjs [--claude] [--mode=번역,요약,번역요약] [url …]  # 번역·요약 결과 → test/tmp_out/transform/
 node test/plugin.mjs        # 가짜 옵시디언 환경에서 플러그인 전체 흐름 검사 (휴대폰처럼 초안 + 가짜 Claude로 마무리 흐름)
 node build.mjs && node test/plugin-desktop.mjs  # 빌드한 main.js를 PC처럼 실행 (Claude Code를 실제로 부름: 번역 확인·요약·별칭·휴대폰 초안 마무리)
+node test/syncnotice.mjs    # Remotely Save 자동 동기화 알림 (가짜 Remotely Save로 시작·끝·실패 순서 검사)
 node test/eval_related.mjs  # 자동 태그·관련 노트 적중률 (실제 Vault 읽기만)
 DEBUG=1 node test/real_vault.mjs "스크랩/경제" url …  # 실제 Vault 기준으로 새 글 스크랩 결과·후보 점수 보기 (메모리에서만 저장)
 node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사
@@ -149,6 +168,7 @@ node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사
 | `src/transform.js` | 번역·요약: 한국어 판별, 구글 번역(자리표시로 마크다운 지키기), 핵심 문장 고르기, Claude 번역 확인(줄 짝짓기·묶음 나누기·고유명사 표기)·요약 |
 | `src/pending.js` | "Claude 확인 대기" 표시 달기·읽기, 초안 지문(고친 노트 덮어쓰지 않기), 마무리 결과 표시 |
 | `src/log.js` | `Claude 확인 기록` 노트: 확인 대기 목록, 노트마다 결과·고친 줄 전후 |
+| `src/syncnotice.js` | Remotely Save 자동 동기화의 시작·끝·실패 알림 (플러그인 객체의 상태 갱신 호출을 감싸서 읽음) |
 | `src/claude.js` | PC의 Claude Code를 구독 계정으로 실행 (`-p --safe-mode --tools ""`) |
 | `src/main.js` | 옵시디언 플러그인: 입력창, 저장(이미지 빼기), 중복 감지, 자동 태그·링크, 설정, `obsidian://scrap` |
 | `build.mjs` | esbuild 번들 → `dist/`, `--install` 시 Vault에 복사 |

@@ -22,6 +22,7 @@ import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
 import { DEFAULT_REASONS, SCRAP_KINDS, copyReasons, searchTitle, fallbackTitle, tabLine, addTabLine } from "./reasons.js";
+import { RS_ID, watchSync } from "./syncnotice.js";
 
 // 입력창·명령에서 "내용을 보고 폴더 고르기"를 뜻하는 값
 const AUTO_FOLDER = "__auto__";
@@ -49,6 +50,9 @@ const DEFAULT_SETTINGS = {
   // 탭 보내기: 켜 둔 이유마다 이 폴더의 노트 하나에 한 줄씩 쌓는다 (1.5.0)
   tabFolder: "수집함",
   reasons: DEFAULT_REASONS,
+  // Remotely Save 자동 동기화가 시작·끝·실패했을 때 알림 (1.6.0). "mobile": 휴대폰·태블릿만, "all": PC도, "off": 끔
+  // PC는 아래쪽 상태 표시줄에 이미 나오므로 기본은 휴대폰·태블릿만
+  syncNotice: "mobile",
 };
 
 // 저장 형태 네 가지. 스크랩할 때마다 이 중에서 고른다 (기본값 없음)
@@ -255,11 +259,25 @@ export default class LinkScrapPlugin extends Plugin {
     desktopCommand("finish-this", "이 노트 Claude로 마무리", () => this.finishActive());
     // 휴대폰에서도 열어 Claude가 확인했는지, 무엇을 고쳤는지 본다
     this.addCommand({ id: "open-claude-log", name: "Claude 확인 기록 열기", callback: () => this.openLog() });
+
+    // Remotely Save 자동 동기화 알림. Remotely Save가 나중에 켜지거나 다시 켜져도 3초 안에 다시 연결한다
+    this.syncWatch = watchSync({
+      getPlugin: () => this.app.plugins?.plugins?.[RS_ID],
+      notify: (text, ms) => new Notice(text, ms),
+      enabled: () => this.settings.syncNotice === "all" || (this.settings.syncNotice === "mobile" && Platform.isMobile),
+    });
+    this.syncWatch.check();
+    this.app.workspace.onLayoutReady(() => {
+      this.syncWatch.check();
+      this.syncTimer = setInterval(() => this.syncWatch.check(), 3000);
+    });
   }
 
   onunload() {
     clearTimeout(this.startTimer);
     clearTimeout(this.pendingTimer);
+    clearInterval(this.syncTimer);
+    this.syncWatch?.stop();
   }
 
   async getIndex() {
@@ -1077,6 +1095,16 @@ class LinkScrapSettingTab extends PluginSettingTab {
         this.display();
       })
     );
+
+    new Setting(containerEl).setName("동기화 알림").setHeading();
+    new Setting(containerEl)
+      .setName("Remotely Save 자동 동기화 알림")
+      .setDesc("Remotely Save는 직접 누른 동기화에만 알림을 띄웁니다. 켜면 앱을 켤 때·주기·저장 뒤에 자동으로 도는 동기화도 시작과 끝, 실패를 Remotely Save와 같은 문장으로 알리고 끝에 (링크 스크랩)을 붙입니다. 저장 뒤 동기화는 끝났을 때만 알립니다. PC는 아래쪽 상태 표시줄에 이미 나옵니다.")
+      .addDropdown((d) =>
+        d.addOption("mobile", "휴대폰·태블릿만").addOption("all", "모든 기기").addOption("off", "끔")
+          .setValue(s.syncNotice)
+          .onChange((v) => ((s.syncNotice = v), save()))
+      );
 
     new Setting(containerEl)
       .setName("번역·요약")
