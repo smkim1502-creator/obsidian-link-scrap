@@ -10,6 +10,8 @@
 
 새 버전은 BRAT이 자동으로 받아 온다. 배포: `manifest.json`의 version을 올리고 같은 이름의 태그를 push하면 GitHub Actions가 릴리스를 만든다.
 
+PC(이 노트북)는 BRAT 없이 `node build.mjs --install`로 Vault 플러그인 폴더에 복사한다. 1.6.1부터 옵시디언이 켜져 있어도 6초쯤 안에 플러그인이 스스로 새 파일을 다시 불러오고 `링크 스크랩 1.6.0 → 1.6.1 업데이트` 알림을 띄운다 (`src/selfupdate.js`). Claude가 노트를 마무리하는 중이면 끝난 뒤에 한다. 지금 불린 버전은 플러그인 폴더 `data.json`의 `loadedVersion`에 적힌다.
+
 ## 저장 형식
 
 ```markdown
@@ -155,9 +157,10 @@ node test/transform.mjs [--claude] [--mode=번역,요약,번역요약] [url …]
 node test/plugin.mjs        # 가짜 옵시디언 환경에서 플러그인 전체 흐름 검사 (휴대폰처럼 초안 + 가짜 Claude로 마무리 흐름)
 node build.mjs && node test/plugin-desktop.mjs  # 빌드한 main.js를 PC처럼 실행 (Claude Code를 실제로 부름: 번역 확인·요약·별칭·휴대폰 초안 마무리)
 node test/syncnotice.mjs    # Remotely Save 자동 동기화 알림 (가짜 Remotely Save로 시작·끝·실패 순서 검사)
+node test/selfupdate.mjs    # PC에서 새 버전 파일을 스스로 다시 불러오기
 node test/eval_related.mjs  # 자동 태그·관련 노트 적중률 (실제 Vault 읽기만)
 DEBUG=1 node test/real_vault.mjs "스크랩/경제" url …  # 실제 Vault 기준으로 새 글 스크랩 결과·후보 점수 보기 (메모리에서만 저장)
-node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사
+node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사 (켜져 있는 PC 옵시디언이 스스로 다시 불러옴)
 ```
 
 | 파일 | 역할 |
@@ -169,6 +172,7 @@ node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사
 | `src/pending.js` | "Claude 확인 대기" 표시 달기·읽기, 초안 지문(고친 노트 덮어쓰지 않기), 마무리 결과 표시 |
 | `src/log.js` | `Claude 확인 기록` 노트: 확인 대기 목록, 노트마다 결과·고친 줄 전후 |
 | `src/syncnotice.js` | Remotely Save 자동 동기화의 시작·끝·실패 알림 (플러그인 객체의 상태 갱신 호출을 감싸서 읽음) |
+| `src/selfupdate.js` | PC: 플러그인 폴더의 파일이 바뀌면 플러그인을 스스로 껐다 켜기 |
 | `src/claude.js` | PC의 Claude Code를 구독 계정으로 실행 (`-p --safe-mode --tools ""`) |
 | `src/main.js` | 옵시디언 플러그인: 입력창, 저장(이미지 빼기), 중복 감지, 자동 태그·링크, 설정, `obsidian://scrap` |
 | `build.mjs` | esbuild 번들 → `dist/`, `--install` 시 Vault에 복사 |

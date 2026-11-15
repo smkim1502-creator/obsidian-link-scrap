@@ -342,3 +342,53 @@ console.log("13 거절 시 표시만 지움 OK:", mock.notices.at(-1));
   assert.equal(mock.notices.length, count + 4);
 }
 console.log("14 동기화 알림 OK:", mock.notices.at(-1));
+
+// 15) PC: 플러그인 폴더에 새 버전이 설치되면 스스로 다시 불러온다. 휴대폰에서는 하지 않는다
+{
+  const make = async (desktop, saved) => {
+    const files = { main: 100, manifest: 100 };
+    const calls = [];
+    const stats = [];
+    const app3 = mock.makeApp(new mock.Vault());
+    app3.vault.adapter = { stat: async (p) => (stats.push(p), { mtime: p.endsWith("main.js") ? files.main : files.manifest, size: 1 }) };
+    app3.plugins = { plugins: {}, disablePlugin: async (id) => calls.push("off " + id), loadManifests: async () => calls.push("manifests"), enablePlugin: async (id) => calls.push("on " + id) };
+    mock.Platform.isDesktopApp = desktop;
+    const p = new LinkScrapPlugin(app3);
+    p.manifest = { id: "link-scrap", version: "1.6.1", dir: ".obsidian/plugins/link-scrap" };
+    const savedData = [];
+    p.loadData = async () => saved;
+    p.saveData = async (d) => savedData.push({ ...d });
+    await p.onload();
+    mock.Platform.isDesktopApp = false;
+    return { p, files, calls, stats, savedData };
+  };
+  // PC: 불러온 버전을 적어 둔다 (처음에는 알림 없음)
+  const a = await make(true, null);
+  assert.deepEqual(a.stats, [".obsidian/plugins/link-scrap/main.js", ".obsidian/plugins/link-scrap/manifest.json"]);
+  assert.equal(a.savedData.at(-1).loadedVersion, "1.6.1");
+  await a.p.fileWatch.check();
+  assert.deepEqual(a.calls, []);
+  // 새 파일이 복사되면 다음다음 확인에서 껐다 켠다. Claude가 마무리하는 중이면 끝난 뒤에
+  a.files.main = a.files.manifest = 200;
+  a.p.pendingBusy = true;
+  await a.p.fileWatch.check();
+  await a.p.fileWatch.check();
+  assert.deepEqual(a.calls, []);
+  a.p.pendingBusy = false;
+  await a.p.fileWatch.check();
+  assert.deepEqual(a.calls, ["off link-scrap", "manifests", "on link-scrap"]);
+  // 버전이 바뀌어 불리면 알린다. 같은 버전이면 다시 적지도 알리지도 않는다
+  const n = mock.notices.length;
+  const b = await make(true, { settingsVersion: 2, loadedVersion: "1.6.0" });
+  assert.equal(mock.notices.at(-1), "링크 스크랩 1.6.0 → 1.6.1 업데이트");
+  assert.equal(b.savedData.at(-1).loadedVersion, "1.6.1");
+  const c = await make(true, { settingsVersion: 2, loadedVersion: "1.6.1" });
+  assert.equal(c.savedData.length, 0);
+  assert.equal(mock.notices.length, n + 1);
+  // 휴대폰: 파일을 보지 않는다
+  const d = await make(false, { settingsVersion: 2 });
+  assert.equal(d.p.fileWatch, undefined);
+  assert.deepEqual(d.stats, []);
+  assert.equal(d.savedData.length, 0);
+}
+console.log("15 PC 자동 다시 불러오기 OK:", mock.notices.at(-1));

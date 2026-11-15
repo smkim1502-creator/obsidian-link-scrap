@@ -23,6 +23,7 @@ import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine }
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
 import { DEFAULT_REASONS, SCRAP_KINDS, copyReasons, searchTitle, fallbackTitle, tabLine, addTabLine } from "./reasons.js";
 import { RS_ID, watchSync } from "./syncnotice.js";
+import { watchFiles, reloadPlugin } from "./selfupdate.js";
 
 // 입력창·명령에서 "내용을 보고 폴더 고르기"를 뜻하는 값
 const AUTO_FOLDER = "__auto__";
@@ -269,8 +270,32 @@ export default class LinkScrapPlugin extends Plugin {
     this.syncWatch.check();
     this.app.workspace.onLayoutReady(() => {
       this.syncWatch.check();
-      this.syncTimer = setInterval(() => this.syncWatch.check(), 3000);
+      this.syncTimer = setInterval(() => {
+        this.syncWatch.check();
+        this.fileWatch?.check();
+      }, 3000);
     });
+
+    // PC: 플러그인 폴더에 새 버전이 설치되면 옵시디언을 다시 켜지 않아도 몇 초 안에 스스로 다시 불러온다
+    if (Platform.isDesktopApp && this.manifest?.dir && this.app.vault.adapter?.stat) {
+      const stat = async () => {
+        const [m, f] = await Promise.all(["main.js", "manifest.json"].map((n) => this.app.vault.adapter.stat(`${this.manifest.dir}/${n}`)));
+        return m && f ? `${m.mtime}:${m.size}:${f.mtime}:${f.size}` : null;
+      };
+      this.fileWatch = watchFiles({
+        stat,
+        busy: () => !!this.pendingBusy, // Claude가 노트를 마무리하는 중이면 끝난 뒤에
+        reload: () => reloadPlugin(this.app.plugins, this.manifest.id),
+      });
+      await this.fileWatch.check(); // 지금 파일 상태를 기준으로 삼는다
+      // 불러온 버전을 적어 두고, 버전이 바뀌어 불렸으면 알린다
+      const version = this.manifest.version;
+      if (version && this.settings.loadedVersion !== version) {
+        if (this.settings.loadedVersion) new Notice(`링크 스크랩 ${this.settings.loadedVersion} → ${version} 업데이트`);
+        this.settings.loadedVersion = version;
+        await this.saveData(this.settings);
+      }
+    }
   }
 
   onunload() {
