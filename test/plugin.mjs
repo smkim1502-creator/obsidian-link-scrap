@@ -77,9 +77,63 @@ plugin.chooseMode("https://example.com/b", "스크랩", []);
 const quick = mock.modals.at(-1);
 quick.onOpen();
 quick.pick = (m) => (picked = m);
-buttonsOf(quick)[1].click();
+buttonsOf(quick).find((x) => x.textContent === "원문 · 요약").click();
 assert.ok(quick.contentEl.textContent.includes("https://example.com/b") && picked.summary && !picked.translate);
 console.log("2-1 저장 형태 버튼 OK");
+
+// 2-2) 탭 보내기: 빠른 창 위쪽에 이유 버튼(설정 목록 + 새 이유), 누르면 이유 노트에 체크박스 한 줄
+assert.deepEqual(
+  buttonsOf(quick).map((x) => x.textContent),
+  ["해 보고 싶은 것", "읽을거리", "볼거리", "생각 재료", "만들고 싶은 것", "사고 싶은 것", "+ 새 이유", "원문 · 전문", "원문 · 요약", "번역 · 전문", "번역 · 요약"]
+);
+const reasonOf = (name) => plugin.settings.reasons.find((r) => r.name === name);
+const search = "https://www.google.com/search?q=%ED%81%B4%EB%A1%9C%EB%93%9C+%EC%BB%B4%ED%93%A8%ED%84%B0+%EC%9C%A0%EC%A6%88&oq=x&client=ms-android";
+plugin.chooseMode(search, "__auto__", []);
+const q2 = mock.modals.at(-1);
+q2.onOpen();
+const whyInput = q2.contentEl.querySelector("input");
+whyInput.value = "나중에 써 보고 싶어서";
+whyInput.dispatchEvent(new q2.contentEl.ownerDocument.defaultView.Event("input"));
+buttonsOf(q2).find((x) => x.textContent === "해 보고 싶은 것").click();
+await new Promise((r) => setTimeout(r, 50));
+const todo = vault.getAbstractFileByPath("수집함/해 보고 싶은 것.md");
+assert.ok(todo, "이유 노트가 생겨야 함");
+assert.match(todo.data, /^# 해 보고 싶은 것\n\n- \[ \] \[구글 검색: 클로드 컴퓨터 유즈\]\(https:\/\/www\.google\.com\/search\?q=[^)]+\) — 나중에 써 보고 싶어서 \(\d{4}-\d\d-\d\d\)\n$/);
+assert.match(mock.notices.at(-1), /「해 보고 싶은 것」에 넣었습니다/);
+// 같은 링크는 한 번만
+await plugin.sendTab(search, reasonOf("해 보고 싶은 것"));
+assert.equal(todo.data.split("\n").filter((l) => l.startsWith("- [ ]")).length, 1);
+assert.match(mock.notices.at(-1), /이미 「해 보고 싶은 것」에 있는 링크/);
+// 링크만: 페이지 제목을 가져와 적는다
+await plugin.sendTab("https://www.nintendo.co.jp/jobs/keyword/181.html", reasonOf("만들고 싶은 것"));
+const make = vault.getAbstractFileByPath("수집함/만들고 싶은 것.md");
+assert.match(make.data, /^- \[ \] \[.*ゲームチャット.*\]\(https:\/\/www\.nintendo\.co\.jp\/jobs\/keyword\/181\.html\) \(\d{4}-/m);
+// 읽을거리: 본문까지 스크랩(노트는 열지 않음, 한국어 글은 번역 안 한다는 알림 없음)하고 그 노트를 링크
+const nOpened = opened.length;
+await plugin.sendTab("https://m.ruliweb.com/nin/board/300004/read/2365831?page=3", reasonOf("읽을거리"), "주말에");
+const read = vault.getAbstractFileByPath("수집함/읽을거리.md");
+assert.match(read.data, /^- \[ \] \[\[[^\]]+\]\] · \[원문\]\(https:\/\/m\.ruliweb\.com\/nin\/board\/300004\/read\/2365831[^)]*\) — 주말에 \(/m, read.data);
+assert.equal(opened.length, nOpened, "탭 보내기는 노트를 열지 않음");
+assert.ok(!mock.notices.some((n) => /한국어 글이라 번역하지/.test(n)));
+// 창에서 새 이유를 만들고 바로 보낸다
+plugin.chooseMode("https://www.nintendo.co.jp/jobs/keyword/124.html", "__auto__", []);
+const q3 = mock.modals.at(-1);
+q3.onOpen();
+buttonsOf(q3).find((x) => x.textContent === "+ 새 이유").click();
+const nameInput = [...q3.contentEl.querySelectorAll("input")].at(-1);
+nameInput.value = "  돈 생기면  ";
+buttonsOf(q3).find((x) => x.textContent === "만들고 보내기").click();
+await new Promise((r) => setTimeout(r, 3000));
+assert.ok(reasonOf("돈 생기면"), "새 이유가 설정에 남아야 함");
+assert.ok(vault.getAbstractFileByPath("수집함/돈 생기면.md")?.data.includes("keyword/124.html"));
+// 주소로 부르기: &reason=…&why=…
+await plugin.protocol({ action: "scrap", url: "https://www.google.com/search?q=%EB%AF%B8%EC%86%8C", reason: "해 보고 싶은 것", why: "표정 연습" });
+assert.match(todo.data, /구글 검색: 미소\]\(.*\) — 표정 연습 \(/);
+// 저장된 이유 목록을 불러와도 기본값을 건드리지 않는다
+const loaded = await migrate({ settingsVersion: 2, reasons: [{ name: "하나뿐" }] });
+assert.deepEqual(loaded.settings.reasons, [{ name: "하나뿐", scrap: "" }]);
+console.log("2-2 탭 보내기 OK");
+console.log(todo.data + read.data);
 
 // 3) 공유 단축어 주소 → 저장 형태 고르는 창 → 고르면 저장. 이미지 없이 글만(디시 글은 이미지가 많다), 자동 분류를 끄면 마지막 폴더로 간다
 plugin.settings.autoFolder = false;

@@ -21,6 +21,7 @@ import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, Clau
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
+import { DEFAULT_REASONS, SCRAP_KINDS, copyReasons, searchTitle, fallbackTitle, tabLine, addTabLine } from "./reasons.js";
 
 // 입력창·명령에서 "내용을 보고 폴더 고르기"를 뜻하는 값
 const AUTO_FOLDER = "__auto__";
@@ -45,6 +46,9 @@ const DEFAULT_SETTINGS = {
   koreanAlias: true,
   // 저장된 설정의 판. 2: 관련 노트 링크를 한 번 끄고, 번역·요약 기본값을 없앴다 (1.3.1)
   settingsVersion: 2,
+  // 탭 보내기: 켜 둔 이유마다 이 폴더의 노트 하나에 한 줄씩 쌓는다 (1.5.0)
+  tabFolder: "수집함",
+  reasons: DEFAULT_REASONS,
 };
 
 // 저장 형태 네 가지. 스크랩할 때마다 이 중에서 고른다 (기본값 없음)
@@ -181,6 +185,8 @@ export default class LinkScrapPlugin extends Plugin {
   async onload() {
     const saved = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    // 이유 목록은 사용자가 고치므로 기본값을 그대로 쓰지 않고 복사한다
+    this.settings.reasons = copyReasons(Array.isArray(saved?.reasons) ? saved.reasons : DEFAULT_REASONS);
     // 1.3.1: 관련 노트 링크는 기본으로 끄고(전에 저장된 '켬'도 한 번 끈다), 번역·요약 기본값은 없앤다
     if (saved && !(saved.settingsVersion >= 2)) {
       this.settings.autoLinks = false;
@@ -208,6 +214,9 @@ export default class LinkScrapPlugin extends Plugin {
       if (!url) return this.openModal();
       const tags = (params.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       if (params.ask === "1" || params.ask === "true") return this.openModal(url);
+      // &reason=읽을거리&why=… : 고르는 창 없이 그 이유로 보낸다
+      const reason = params.reason && this.settings.reasons.find((r) => r.name === params.reason);
+      if (reason) return this.sendTab(url, reason, params.why || "");
       const folder = params.folder || this.defaultFolder();
       if (params.translate === undefined && params.summary === undefined) return this.chooseMode(url, folder, tags);
       const on = (v) => v === "1" || v === "true";
@@ -630,11 +639,15 @@ export default class LinkScrapPlugin extends Plugin {
   /**
    * @param {{translate:boolean, summary:boolean}} mode  번역(한국어로) · 요약
    */
-  async scrap(url, folder, tags, mode = MODES[0][1]) {
+  /**
+   * @param {{open?:boolean, quietKorean?:boolean}} opts  open: 저장 뒤 노트 열기(기본: 설정), quietKorean: 한국어 글이라 번역 안 한 것은 알리지 않음
+   */
+  async scrap(url, folder, tags, mode = MODES[0][1], opts = {}) {
+    const open = opts.open ?? this.settings.openAfter;
     const existing = this.findExisting(url);
     if (existing) {
       new Notice(`이미 스크랩한 글입니다: ${existing.basename}`);
-      if (this.settings.openAfter) this.app.workspace.getLeaf(false).openFile(existing);
+      if (open) this.app.workspace.getLeaf(false).openFile(existing);
       return existing;
     }
 
@@ -665,7 +678,7 @@ export default class LinkScrapPlugin extends Plugin {
             if (t.retry && !r.fallback) Object.assign(jobs, { translate: t.translated, summary: t.summarized });
             if (t.done) claudeDone = { jobs: { translate: t.translated, summary: t.summarized }, r: t };
             else if (runClaude && !t.retry && t.warning) claudeFail = t.warning.replace(/^Claude가 /, "");
-          } else if (mode.translate && !r.fallback) {
+          } else if (mode.translate && !r.fallback && !opts.quietKorean) {
             remarks.push("한국어 글이라 번역하지 않았습니다");
           }
         } catch (e) {
@@ -736,13 +749,100 @@ export default class LinkScrapPlugin extends Plugin {
       ].filter(Boolean).join(" · ");
       const head = r.fallback ? `본문을 찾지 못해 미리보기만 저장했습니다: ${name}` : `스크랩 완료: ${name}`;
       new Notice([head, extra, ...remarks].filter(Boolean).join("\n"), remarks.length ? 10000 : 6000);
-      if (this.settings.openAfter) await this.app.workspace.getLeaf(false).openFile(file);
+      if (open) await this.app.workspace.getLeaf(false).openFile(file);
       return file;
     } catch (e) {
       notice.hide();
       new Notice(`스크랩 실패: ${e.message || e}`, 8000);
       console.error("[link-scrap]", url, e);
     }
+  }
+
+  // ---------- 탭 보내기 ----------
+
+  reasonPath(reason) {
+    return normalizePath(`${this.settings.tabFolder || "수집함"}/${safeFileName(reason.name) || "이유"}.md`);
+  }
+
+  /**
+   * 켜 둔 이유의 노트에 한 줄을 더한다. 본문도 저장하는 이유면 먼저 스크랩하고 그 노트를 링크한다.
+   * 스크랩이 막히면 링크만이라도 남긴다 (탭을 닫아도 잃지 않게)
+   * @returns {Promise<TFile|undefined>} 이유 노트
+   */
+  async sendTab(url, reason, why = "") {
+    url = findUrl(url);
+    if (!url) return new Notice("올바른 링크가 아닙니다");
+    const path = this.reasonPath(reason);
+    const date = stamp().slice(0, 10);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    const before = existing instanceof TFile ? await this.app.vault.read(existing) : "";
+    if (addTabLine(before, reason.name, "", cleanUrl(url)) === null) {
+      new Notice(`이미 「${reason.name}」에 있는 링크입니다. 탭을 닫아도 됩니다`);
+      return existing;
+    }
+
+    let line = "";
+    let link = cleanUrl(url);
+    let remark = "";
+    if (reason.scrap) {
+      const mode = { translate: reason.scrap === "translate", summary: false };
+      const note = await this.scrap(url, this.defaultFolder(), [], mode, { open: false, quietKorean: true });
+      if (note instanceof TFile) {
+        link = cleanUrl(this.app.metadataCache.getFileCache(note)?.frontmatter?.url || link);
+        line = tabLine({ url: link, note: this.app.metadataCache.fileToLinktext(note, path, true), why, date });
+      } else {
+        remark = "본문은 저장하지 못해 링크만 남겼습니다";
+      }
+    }
+    if (!line) {
+      let title = searchTitle(url);
+      if (!title) {
+        const notice = new Notice("제목을 가져오는 중…", 0);
+        try {
+          const r = await this.fetchArticle(url);
+          title = r.fallback && !r.title ? "" : r.title;
+          link = cleanUrl(r.url || link);
+        } catch (e) {
+          console.error("[link-scrap] 탭 제목 가져오기 실패", url, e);
+        } finally {
+          notice.hide();
+        }
+      }
+      line = tabLine({ title: title || fallbackTitle(url), url: link, why, date });
+    }
+
+    let file = this.app.vault.getAbstractFileByPath(path);
+    let added = true;
+    if (file instanceof TFile) {
+      await this.app.vault.process(file, (cur) => {
+        const next = addTabLine(cur, reason.name, line, link);
+        if (next === null) added = false;
+        return next ?? cur;
+      });
+    } else {
+      await this.ensureFolder(path.slice(0, path.lastIndexOf("/")));
+      file = await this.app.vault.create(path, addTabLine("", reason.name, line, link));
+    }
+    new Notice(
+      [added ? `「${reason.name}」에 넣었습니다. 탭을 닫아도 됩니다` : `이미 「${reason.name}」에 있는 링크입니다. 탭을 닫아도 됩니다`, remark]
+        .filter(Boolean)
+        .join("\n"),
+      remark ? 10000 : 5000
+    );
+    return file;
+  }
+
+  // 창에서 바로 새 이유를 만든다. 같은 이름이 있으면 그것을 쓴다
+  async addReason(name) {
+    name = (name || "").replace(/\s+/g, " ").trim();
+    if (!name) return null;
+    let r = this.settings.reasons.find((x) => x.name === name);
+    if (!r) {
+      r = { name, scrap: "" };
+      this.settings.reasons.push(r);
+      await this.saveData(this.settings);
+    }
+    return r;
   }
 }
 
@@ -758,7 +858,8 @@ function addModeButtons(parent, onPick) {
   return grid;
 }
 
-// 공유 단축어·빠른 실행용: 링크는 이미 있으니 저장 형태만 고른다
+// 공유 단축어·빠른 실행용: 링크는 이미 있으니 어디로 보낼지만 고른다.
+// 위: 켜 둔 이유(탭 보내기) — 이유 노트에 한 줄. 아래: 저장 형태 네 개(본문 스크랩)
 class ModeModal extends Modal {
   constructor(app, plugin, url, folder, tags) {
     super(app);
@@ -766,13 +867,65 @@ class ModeModal extends Modal {
     this.url = url;
     this.folder = folder;
     this.tags = tags;
+    this.why = "";
   }
 
   onOpen() {
-    this.titleEl.setText("저장 형태");
-    const link = this.contentEl.createDiv({ text: this.url });
+    const { contentEl } = this;
+    this.titleEl.setText("어디로 보낼까요");
+    const link = contentEl.createDiv({ text: this.url });
     link.style.cssText = "font-size:var(--font-ui-smaller);color:var(--text-muted);word-break:break-all;";
-    addModeButtons(this.contentEl, (mode) => this.pick(mode));
+
+    const label = (text) => {
+      const h = contentEl.createDiv({ text });
+      h.style.cssText = "margin-top:16px;font-weight:var(--font-semibold);";
+      return h;
+    };
+    label("켜 둔 이유");
+    const why = contentEl.createEl("input");
+    why.type = "text";
+    why.placeholder = "이유 한 줄 (비워도 됨)";
+    why.style.cssText = "width:100%;margin-top:8px;";
+    why.addEventListener("input", () => (this.why = why.value));
+    this.reasonGrid = contentEl.createDiv();
+    this.drawReasons();
+
+    label("본문 스크랩");
+    addModeButtons(contentEl, (mode) => this.pick(mode));
+  }
+
+  drawReasons() {
+    const grid = this.reasonGrid;
+    grid.empty();
+    grid.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;";
+    const button = (text, onClick) => {
+      const b = grid.createEl("button", { text });
+      b.style.cssText = "width:100%;height:auto;padding:12px 8px;";
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    for (const r of this.plugin.settings.reasons) button(r.name, () => this.send(r));
+    const add = button("+ 새 이유", () => {
+      add.remove();
+      const row = grid.createDiv();
+      row.style.cssText = "grid-column:1 / -1;display:flex;gap:8px;";
+      const input = row.createEl("input");
+      input.type = "text";
+      input.placeholder = "새 이유 이름 (예: 사고 싶은 것)";
+      input.style.cssText = "flex:1;min-width:0;";
+      const ok = row.createEl("button", { text: "만들고 보내기" });
+      ok.addEventListener("click", async () => {
+        const r = await this.plugin.addReason(input.value);
+        if (!r) return new Notice("이유 이름을 적어 주세요");
+        this.send(r);
+      });
+      input.focus();
+    });
+  }
+
+  send(reason) {
+    this.close();
+    return this.plugin.sendTab(this.url, reason, this.why);
   }
 
   pick(mode) {
@@ -886,6 +1039,44 @@ class LinkScrapSettingTab extends PluginSettingTab {
       .addText((t) =>
         t.setValue(s.excludeFolders).onChange((v) => ((s.excludeFolders = v), (this.plugin.index = null), save()))
       );
+
+    new Setting(containerEl)
+      .setName("탭 보내기 (켜 둔 이유)")
+      .setDesc("빠른 스크랩·공유 창 위쪽의 이유 버튼입니다. 누르면 아래 폴더의 '이유 이름' 노트에 링크가 한 줄(체크박스)로 쌓입니다. 창에서 '+ 새 이유'로 바로 만들 수도 있습니다. 이름을 바꾸면 그다음부터 새 이름의 노트에 쌓입니다.")
+      .setHeading();
+    new Setting(containerEl)
+      .setName("이유 노트 폴더")
+      .addText((t) => t.setValue(s.tabFolder).onChange((v) => ((s.tabFolder = v.trim() || "수집함"), save())));
+    s.reasons.forEach((r, i) => {
+      new Setting(containerEl)
+        .addText((t) => t.setValue(r.name).onChange((v) => ((r.name = v.replace(/\s+/g, " ").trim() || r.name), save())))
+        .addDropdown((d) => {
+          SCRAP_KINDS.forEach(([v, l]) => d.addOption(v, l));
+          d.setValue(r.scrap || "").onChange((v) => ((r.scrap = v), save()));
+        })
+        .addExtraButton((b) =>
+          b.setIcon("arrow-up").setTooltip("위로").onClick(async () => {
+            if (i === 0) return;
+            [s.reasons[i - 1], s.reasons[i]] = [s.reasons[i], s.reasons[i - 1]];
+            await save();
+            this.display();
+          })
+        )
+        .addExtraButton((b) =>
+          b.setIcon("trash").setTooltip("지우기 (이미 쌓인 노트는 그대로)").onClick(async () => {
+            s.reasons.splice(i, 1);
+            await save();
+            this.display();
+          })
+        );
+    });
+    new Setting(containerEl).addButton((b) =>
+      b.setButtonText("이유 추가").onClick(async () => {
+        s.reasons.push({ name: `새 이유 ${s.reasons.length + 1}`, scrap: "" });
+        await save();
+        this.display();
+      })
+    );
 
     new Setting(containerEl)
       .setName("번역·요약")
