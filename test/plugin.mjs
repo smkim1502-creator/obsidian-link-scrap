@@ -445,3 +445,14 @@ console.log("16 구글 막힘 → 원문 + 확인 대기 → PC 마무리 OK:", 
   assert.equal(cmd.checkCallback(true), false);
 }
 console.log("17 사용자 승인 OK:", mock.notices.at(-1));
+
+// 18) 번역 용어집 노트: 없으면 명령이 틀을 만들고, 플러그인이 읽어 쓴다
+{
+  assert.deepEqual(await plugin.terms(), []);
+  await plugin.openTerms();
+  const note = vault.getAbstractFileByPath("스크랩/번역 용어집.md");
+  assert.ok(note && note.data.includes("- カービィ → 커비"), note?.data);
+  assert.equal(opened.at(-1), "스크랩/번역 용어집.md");
+  assert.deepEqual((await plugin.terms()).map((t) => t.join("→")), ["カービィ→커비", "카비→커비"]);
+}
+console.log("18 번역 용어집 OK");

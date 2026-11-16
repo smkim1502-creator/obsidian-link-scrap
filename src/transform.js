@@ -337,7 +337,43 @@ async function localSummary({ title, markdown }, translate, post) {
 // ---------- Claude Code ----------
 
 /** Claude에게 줄 지시문과 글 (요약, 또는 원문 언어로 나온 요약문의 번역) */
-export function claudePrompt({ title, markdown }, { translate, summary }) {
+// ---------- 사용자 용어집: "원어 → 한국어" 표기를 늘 그대로 쓰게 한다 ----------
+
+/** 용어집 노트를 읽는다. 한 줄에 "- 원래 표기 → 바꿀 표기" (-> 나 = 도 받는다). 제목·빈 줄·설명 줄은 건너뛴다 */
+export function parseTerms(text) {
+  const out = [];
+  for (const raw of String(text || "").replace(/\r\n/g, "\n").split("\n")) {
+    const m = raw.match(/^\s*[-*]\s+(.+?)\s*(?:→|->|=)\s*(.+?)\s*$/);
+    if (!m || m[1] === m[2] || m[1].length > 60 || m[2].length > 60) continue;
+    out.push([m[1], m[2]]);
+  }
+  // 긴 표기부터 바꿔야 짧은 표기가 긴 표기 일부를 먼저 바꾸지 않는다
+  return out.sort((x, y) => y[0].length - x[0].length);
+}
+
+/** 글에 나오는 항목만 지시문용 줄로 */
+export function termLines(terms, text) {
+  return (terms || [])
+    .filter(([from]) => text.includes(from))
+    .map(([from, to]) => `${from} → ${to}`)
+    .join("\n");
+}
+
+/** 한국어로 옮긴 결과에서 용어집의 원래 표기를 바꿀 표기로 바꾼다 (원어가 남았거나, 잘못 옮긴 한국어 표기) */
+export function applyTerms(s, terms) {
+  if (!s || !terms?.length) return s;
+  const marks = [];
+  // 한 번 바꾼 자리는 다른 항목이 다시 바꾸지 않게 잠깐 자리표시로 둔다
+  for (const [from, to] of terms) s = s.split(from).join(`\u0000${marks.push(to) - 1}\u0000`);
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => marks[i]);
+}
+
+const termRule = (terms, text) => {
+  const t = termLines(terms, text);
+  return t ? `아래 표기는 반드시 그대로 쓴다(사용자 용어집):\n${t}` : "";
+};
+
+export function claudePrompt({ title, markdown }, { translate, summary }, terms = []) {
   const rules = [];
   const lang = translate ? "한국어" : "원문과 같은 언어(일본어 글이면 일본어, 영어 글이면 영어)";
   if (summary) {
@@ -353,6 +389,8 @@ export function claudePrompt({ title, markdown }, { translate, summary }) {
     rules.push('첫 줄은 "# 번역한 제목", 빈 줄 다음부터 본문을 쓴다. 마크다운 구조는 그대로 두고, \'~했다\', \'~이다\'로 끝나는 문어체로 쓴다.');
   }
   if (translate) rules.push("고유명사는 한국 정식 명칭이 있으면 그것을 쓰고(게임·작품·회사·인물), 없으면 원어 발음대로 한글로 적는다. 한자·가나를 섞어 쓰지 않는다.");
+  const tr = translate ? termRule(terms, `${title}\n${markdown}`) : "";
+  if (tr) rules.push(tr);
   // 글이 길면 앞의 지시를 잊고 원문 언어로 쓰는 일이 있어, 글 뒤에 출력 언어를 한 번 더 적는다
   return `${rules.map((r) => `- ${r}`).join("\n")}\n\n<article>\n# ${title}\n\n${markdown.trim()}\n</article>\n\n위 글을 ${summary ? "요약" : "번역"}한 결과만 ${lang}로 출력한다.\n`;
 }
@@ -368,17 +406,17 @@ export function parseClaude(text, fallbackTitle) {
 /** Claude가 응답은 했지만 쓸 수 없는 결과(거절 등)나 원문 본문이 없는 경우. 다시 시도해도 같을 가능성이 높아 다시 시도하지 않는다 */
 export class ClaudeRefused extends Error {}
 
-async function claudeSummary(a, translate, runClaude) {
+async function claudeSummary(a, translate, runClaude, terms = []) {
   // 출력 언어와 머리말 금지는 시스템 지시에 둬야 지켜진다 (본문 지시만으로는 일본어로 요약하거나 "이 글은 …"으로 시작한다)
   const lang = translate ? "Write the entire output in Korean." : "Write in the same language as the article.";
   const system = `${lang} Never refer to the article itself (no openings like '이 글은', '이 기사는', 'この記事は', 'This article'); state its content directly, with the people or things it is about as subjects.`;
   // 이미지 주소는 요약에 필요 없으니 빼고 보낸다
   const md = a.markdown.replace(/^[ \t]*(!\[[^\]]*\]\([^)]*\)|!\[\[[^\]]+\]\])[ \t]*$/gm, "");
-  let r = parseClaude(await runClaude(claudePrompt({ title: a.title, markdown: md }, { translate, summary: true }), { system }), a.title);
+  let r = parseClaude(await runClaude(claudePrompt({ title: a.title, markdown: md }, { translate, summary: true }, terms), { system }), a.title);
   // 그래도 원문 언어로 요약해 오면, 짧은 요약문만 다시 번역시킨다
   const korean = (x) => isKorean(`${x.title}\n${x.markdown}`);
   if (translate && !korean(r)) {
-    r = parseClaude(await runClaude(claudePrompt(r, { translate: true, summary: false }), { system }), r.title);
+    r = parseClaude(await runClaude(claudePrompt(r, { translate: true, summary: false }, terms), { system }), r.title);
     if (!korean(r)) throw new ClaudeRefused("한국어로 요약하지 못했습니다");
   }
   if (!r.markdown.trim()) throw new ClaudeRefused("요약이 비어 있습니다");
@@ -530,11 +568,12 @@ export function parseFixes(out) {
  * @param {{progress?:(done:number, total:number)=>void}} [opts]
  * @returns {Promise<{title:string, markdown:string, fixes:number}>}
  */
-export async function claudeReview(a, draft, runClaude, { progress } = {}) {
+export async function claudeReview(a, draft, runClaude, { progress, terms = [] } = {}) {
   const plan = reviewPlan(a, draft);
   const { lines, ids, pieces, groups } = plan;
   const system = "Write the entire output in Korean.";
   let glossary = "";
+  const user = termLines(terms, `${a.title}\n${a.markdown}`);
   if (groups.length > 1 && (a.markdown.match(CJK_KANA) || []).length > 200) {
     try {
       glossary = await claudeGlossary(plan, runClaude);
@@ -542,6 +581,11 @@ export async function claudeReview(a, draft, runClaude, { progress } = {}) {
       if (e instanceof ClaudeRefused) glossary = "";
       else throw e;
     }
+  }
+  // 사용자 용어집이 Claude가 정한 표기보다 앞선다
+  if (user) {
+    const mine = new Set(user.split("\n").map((l) => l.split("→")[0].trim()));
+    glossary = [user, ...glossary.split("\n").filter((l) => l && !mine.has(l.split("→")[0].trim()))].join("\n");
   }
   let finished = 0;
   const outs = await pool(groups, REVIEW_PARALLEL, async (nums) => {
@@ -596,9 +640,10 @@ export async function claudeReview(a, draft, runClaude, { progress } = {}) {
 }
 
 /** 제목 하나를 Claude로 한국어로 옮긴다 (외국어 제목 노트의 별칭용) */
-export async function claudeTitle(title, runClaude) {
+export async function claudeTitle(title, runClaude, terms = []) {
+  const tr = termRule(terms, title);
   const out = await runClaude(
-    `다음 글 제목을 한국어로 옮긴다. 게임·작품·회사·인물은 한국 정식 명칭이 있으면 그것을 쓴다. 옮긴 제목 한 줄만 출력한다.\n\n${title}\n`,
+    `다음 글 제목을 한국어로 옮긴다. 게임·작품·회사·인물은 한국 정식 명칭이 있으면 그것을 쓴다.${tr ? `\n${tr}\n` : " "}옮긴 제목 한 줄만 출력한다.\n\n${title}\n`,
     { system: "Write the entire output in Korean." }
   );
   const t = out.trim().split("\n")[0].replace(/^#\s+/, "").replace(/^"(.*)"$/, "$1").trim();
@@ -622,11 +667,18 @@ export async function googleTitle(title, post) {
  * @param {{progress?:(done:number, total:number)=>void}} [opts]  긴 번역을 나눠 확인할 때 진행 상황
  */
 export async function finishDraft(a, draft, jobs, runClaude, opts = {}) {
+  const terms = opts.terms || [];
   if (jobs.summary) {
-    const r = await claudeSummary(a, jobs.translate, runClaude);
-    return { title: r.title, markdown: r.markdown, parts: 1, answered: 1 };
+    const r = await claudeSummary(a, jobs.translate, runClaude, terms);
+    return withTerms({ title: r.title, markdown: r.markdown, parts: 1, answered: 1 }, jobs.translate && terms);
   }
-  return claudeReview(a, draft, runClaude, opts);
+  return withTerms(await claudeReview(a, draft, runClaude, opts), terms);
+}
+
+// 한국어로 옮긴 결과에 용어집을 한 번 더 적용한다 (Claude가 놓친 표기)
+function withTerms(r, terms) {
+  if (!r || !terms?.length) return r;
+  return { ...r, title: applyTerms(r.title, terms), markdown: applyTerms(r.markdown, terms) };
 }
 
 /**
@@ -669,21 +721,21 @@ export async function transformArticle(a, mode, deps) {
     say(summary ? "Claude가 요약하는 중…" : "Claude가 번역을 확인하는 중… (긴 글은 1~2분)");
     const progress = (d, n) => n > 1 && say(`Claude가 번역을 확인하는 중… (${d}/${n})`);
     try {
-      const r = await finishDraft(a, draft, jobs, deps.runClaude, { progress });
+      const r = await finishDraft(a, draft, jobs, deps.runClaude, { progress, terms: deps.terms });
       const warning = r.answered < r.parts ? `글이 길어 ${r.parts}부분으로 나눠 확인했는데 ${r.parts - r.answered}부분은 Claude가 확인하지 않아 구글 번역 그대로 두었습니다` : "";
       return { ...base, ...r, done: true, retry: false, warning };
     } catch (e) {
       // Claude가 실행되지 않았으면(로그인 만료·사용량 한도·시간 초과) 나중에 다시, 응답했는데 쓸 수 없으면 초안 그대로
       const retry = !(e instanceof ClaudeRefused);
       const what = summary ? "요약하지 못해 핵심 문장 고르기로 대신했습니다" : "번역을 확인하지 못해 구글 번역 그대로 저장했습니다";
-      const r = await local();
+      const r = withTerms(await local(), translate && deps.terms);
       if (!r) return { ...raw(new GoogleDown(`Claude가 ${summary ? "요약" : "번역"}하지 못했고 구글 번역도 응답하지 않습니다 (${e.message || e})`)), retry };
       return { ...base, ...r, done: false, retry, warning: `Claude가 ${what} (${e.message || e})` };
     }
   }
   if (summary) say("요약하는 중…");
   try {
-    return { ...base, ...(draft || (await localSummary(a, translate, deps.post))), done: false, retry: true, warning: "" };
+    return { ...base, ...withTerms(draft || (await localSummary(a, translate, deps.post)), translate && deps.terms), done: false, retry: true, warning: "" };
   } catch (e) {
     if (e instanceof GoogleDown) return raw(e);
     throw e;

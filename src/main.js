@@ -17,13 +17,24 @@ import {
 import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
-import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown } from "./transform.js";
+import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms } from "./transform.js";
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine, reviewLine, REVIEW_KEY } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
 import { DEFAULT_REASONS, SCRAP_KINDS, copyReasons, searchTitle, fallbackTitle, tabLine, addTabLine } from "./reasons.js";
 import { RS_ID, watchSync } from "./syncnotice.js";
 import { watchFiles, reloadPlugin } from "./selfupdate.js";
+
+// 번역 용어집 노트
+const TERMS_NAME = "번역 용어집";
+const TERMS_TEMPLATE = `# 번역 용어집
+
+번역·요약·별칭을 만들 때 이 표기를 늘 그대로 쓴다. 한 줄에 하나씩 \`- 원래 표기 → 바꿀 표기\`.
+왼쪽에 원어를 쓰면 Claude에게 그 표기를 쓰라고 알려 주고, 왼쪽에 잘못 나온 한국어 표기를 쓰면 결과에서 바로 바꾼다.
+
+- カービィ → 커비
+- 카비 → 커비
+`;
 
 // 승인 목록 (옵시디언 Bases). 승인 체크박스가 꺼진 노트 / 아직 Claude를 기다리는 노트 / 승인한 노트
 const REVIEW_BASE = "스크랩 승인";
@@ -297,6 +308,7 @@ export default class LinkScrapPlugin extends Plugin {
     this.addCommand({ id: "open-claude-log", name: "Claude 확인 기록 열기", callback: () => this.openLog() });
     // Claude를 거친 번역·요약을 사용자가 읽고 승인하는 목록 (옵시디언 Bases 표)
     this.addCommand({ id: "open-review", name: "스크랩 승인 목록 열기", callback: () => this.openReview() });
+    this.addCommand({ id: "open-terms", name: "번역 용어집 열기", callback: () => this.openTerms() });
     this.addCommand({
       id: "approve-this",
       name: "이 스크랩 승인",
@@ -356,7 +368,7 @@ export default class LinkScrapPlugin extends Plugin {
   async getIndex() {
     if (this.index) return this.index;
     const excluded = splitList(this.settings.excludeFolders);
-    const files = this.app.vault.getMarkdownFiles().filter((f) => !inFolders(f.path, excluded) && f.path !== this.logPath());
+    const files = this.app.vault.getMarkdownFiles().filter((f) => !inFolders(f.path, excluded) && f.path !== this.logPath() && f.path !== this.termsPath());
     const notes = await Promise.all(
       files.map(async (f) => {
         const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
@@ -405,11 +417,12 @@ export default class LinkScrapPlugin extends Plugin {
   // pending: 구글 번역으로 옮겨서 나중에 Claude가 다시 옮기면 좋음
   async koreanAliases(title, runClaude) {
     if (!this.settings.koreanAlias || isKorean(title)) return { aliases: [], pending: false };
+    const terms = await this.terms();
     let t = "";
     let pending = true;
     if (runClaude) {
       try {
-        t = await claudeTitle(title, runClaude);
+        t = await claudeTitle(title, runClaude, terms);
         pending = false;
       } catch (e) {
         pending = !(e instanceof ClaudeRefused);
@@ -420,6 +433,7 @@ export default class LinkScrapPlugin extends Plugin {
     } catch (e) {
       console.error("[link-scrap] 제목 번역 실패", e);
     }
+    t = applyTerms(t, terms);
     return t && t !== title ? { aliases: [t], pending } : { aliases: [], pending: false };
   }
 
@@ -540,11 +554,11 @@ export default class LinkScrapPlugin extends Plugin {
         say("구글 번역 중…");
         draft = await translateMarkdown(a, io.post);
       }
-      r = await finishDraft(a, draft, note.jobs, run, { progress });
+      r = await finishDraft(a, draft, note.jobs, run, { progress, terms: await this.terms() });
       ({ title, markdown: body } = r);
     }
     if (note.jobs.alias && !isKorean(title)) {
-      const t = await claudeTitle(title, run);
+      const t = applyTerms(await claudeTitle(title, run, await this.terms()), await this.terms());
       aliases = t !== title ? [t] : [];
     }
 
@@ -651,6 +665,30 @@ export default class LinkScrapPlugin extends Plugin {
     }
     if (file instanceof TFile) await this.app.workspace.getLeaf(false).openFile(file);
     else new Notice("아직 기록이 없습니다. PC 옵시디언에서 Claude가 처음 마무리하면 생깁니다");
+  }
+
+  // 번역 용어집: 스크랩 폴더의 노트. "- 원래 표기 → 바꿀 표기" 줄을 번역·요약·별칭에 늘 적용한다 (휴대폰에서도 고칠 수 있게 노트로 둔다)
+  termsPath() {
+    return normalizePath(`${this.settings.rootFolder || "스크랩"}/${TERMS_NAME}.md`);
+  }
+
+  async terms() {
+    const f = this.app.vault.getAbstractFileByPath(this.termsPath());
+    if (!(f instanceof TFile)) return [];
+    try {
+      return parseTerms(await this.app.vault.cachedRead(f));
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async openTerms() {
+    let file = this.app.vault.getAbstractFileByPath(this.termsPath());
+    if (!(file instanceof TFile)) {
+      await this.ensureFolder(this.settings.rootFolder || "스크랩");
+      file = await this.app.vault.create(this.termsPath(), TERMS_TEMPLATE);
+    }
+    await this.app.workspace.getLeaf(false).openFile(file);
   }
 
   // 승인 목록: 스크랩 폴더의 Bases 파일. 없으면 만든다 (사용자가 고친 파일은 덮어쓰지 않는다)
@@ -779,7 +817,7 @@ export default class LinkScrapPlugin extends Plugin {
       if (r.kind === "pdf" && (mode.translate || mode.summary)) remarks.push("PDF는 원문 그대로 저장했습니다");
       if (r.kind === "article" && (mode.translate || mode.summary)) {
         try {
-          const t = await transformArticle(r, mode, { post: io.post, runClaude, progress: (m) => notice.setMessage(m) });
+          const t = await transformArticle(r, mode, { post: io.post, runClaude, terms: await this.terms(), progress: (m) => notice.setMessage(m) });
           if (t) {
             ({ title, markdown } = t);
             translated = t.translated && !t.raw; // raw: 구글 번역이 막혀 원문 그대로
