@@ -17,7 +17,7 @@ import {
 import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
-import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused } from "./transform.js";
+import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown } from "./transform.js";
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
@@ -486,7 +486,13 @@ export default class LinkScrapPlugin extends Plugin {
       if (a.kind !== "article" || a.fallback) throw new ClaudeRefused("원문 본문을 찾지 못했습니다");
       say(note.jobs.summary ? "Claude가 요약하는 중…" : "Claude가 번역을 확인하는 중…");
       const progress = (d, n) => n > 1 && say(`Claude가 번역을 확인하는 중… (${d}/${n})`);
-      r = await finishDraft(a, { title, markdown: body }, note.jobs, run, { progress });
+      // 휴대폰에서 구글 번역이 막혀 원문으로 저장된 노트는 여기서 번역 초안부터 만든다
+      let draft = { title, markdown: body };
+      if (note.jobs.translate && !note.jobs.summary && !isKorean(`${title}\n${body}`)) {
+        say("구글 번역 중…");
+        draft = await translateMarkdown(a, io.post);
+      }
+      r = await finishDraft(a, draft, note.jobs, run, { progress });
       ({ title, markdown: body } = r);
     }
     if (note.jobs.alias && !isKorean(title)) {
@@ -714,7 +720,8 @@ export default class LinkScrapPlugin extends Plugin {
         try {
           const t = await transformArticle(r, mode, { post: io.post, runClaude, progress: (m) => notice.setMessage(m) });
           if (t) {
-            ({ title, markdown, translated } = t);
+            ({ title, markdown } = t);
+            translated = t.translated && !t.raw; // raw: 구글 번역이 막혀 원문 그대로
             if (translated) matchText = markdown;
             if (t.warning) remarks.push(t.warning);
             // 미리보기만 있는 페이지는 PC에서 다시 받아도 본문이 없으므로 표시하지 않는다

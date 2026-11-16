@@ -392,3 +392,26 @@ console.log("14 동기화 알림 OK:", mock.notices.at(-1));
   assert.equal(d.savedData.length, 0);
 }
 console.log("15 PC 자동 다시 불러오기 OK:", mock.notices.at(-1));
+
+// 16) 휴대폰에서 구글 번역이 막히면(429) 원문으로 저장하되 확인 대기 표시 → PC가 번역 초안부터 만들어 마무리
+{
+  const realFetch = globalThis.fetch;
+  let blocked = 0;
+  globalThis.fetch = (url, opts) => (String(url).includes("translate.googleapis") ? (blocked++, Promise.resolve(new Response("", { status: 429 }))) : realFetch(url, opts));
+  plugin.claude = () => undefined;
+  mock.Platform.isDesktopApp = false;
+  const f = await plugin.scrap("https://paulgraham.com/useful.html", "스크랩", [], { translate: true, summary: false });
+  globalThis.fetch = realFetch;
+  assert.ok(blocked >= 3, "다시 보내기까지 해야 함");
+  assert.match(f.data, MARK("번역"));
+  assert.ok(!/[가-힯]/.test(f.data.split("\n---\n")[1] || ""), "본문은 원문 그대로");
+  assert.match(mock.notices.at(-1), /HTTP 429.*원문으로 저장했습니다[\s\S]*PC 옵시디언에서 Claude가 마무리합니다/);
+  // PC: 구글이 풀렸으면 번역 초안을 만들고 Claude가 확인
+  plugin.claude = () => fakeClaude;
+  mock.Platform.isDesktopApp = true;
+  assert.equal(await plugin.finishNote(f), "done");
+  assert.ok(!/확인 대기/.test(f.data) && /^# .*[가-힯]/m.test(f.data), f.data.slice(0, 300));
+  assert.match(f.data, DONE("번역 확인 완료", " · \\d+줄 중 \\d+줄 고침"));
+  mock.Platform.isDesktopApp = false;
+}
+console.log("16 구글 막힘 → 원문 + 확인 대기 → PC 마무리 OK:", mock.notices.at(-1));

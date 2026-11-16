@@ -8,6 +8,10 @@ import { plainText, tokenize } from "./related.js";
 const GT_URL = "https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl=ko&format=text";
 const GT_MAX = 4500; // 요청 하나에 넣을 글 길이
 const GT_BATCH = 20000; // 요청 하나에 넣을 글 길이 합
+const GT_WAITS = [2000, 6000]; // 막혔을 때 다시 보내기 전 쉬는 시간
+
+/** 구글 번역이 막혔거나 응답하지 않음 — 원문으로 저장하고 나중에 PC에서 다시 한다 */
+export class GoogleDown extends Error {}
 
 const HANGUL = /[가-힯]/g;
 const CJK_KANA = /[぀-ヿ㐀-鿿]/g;
@@ -93,15 +97,21 @@ export function restore(text, pieces, expected = pieces.map((_, i) => i)) {
  * @param {string[]} texts
  * @param {(url:string, body:string, contentType:string)=>Promise<{status:number, text:string}>} post
  */
-export async function googleTranslate(texts, post) {
+export async function googleTranslate(texts, post, { waits = GT_WAITS } = {}) {
   const out = new Array(texts.length).fill("");
   let batch = [];
   let size = 0;
   const flush = async () => {
     if (!batch.length) return;
     const body = batch.map((i) => "q=" + encodeURIComponent(texts[i])).join("&");
-    const res = await post(GT_URL, body, "application/x-www-form-urlencoded;charset=UTF-8");
-    if (res.status !== 200) throw new Error(`구글 번역이 응답하지 않습니다 (HTTP ${res.status})`);
+    let res;
+    // 요청이 몰려 막히면(429)·서버 오류(5xx)면 잠시 쉬었다가 다시 보낸다
+    for (let k = 0; ; k++) {
+      res = await post(GT_URL, body, "application/x-www-form-urlencoded;charset=UTF-8");
+      if (res.status === 200 || !(res.status === 429 || res.status >= 500) || k >= waits.length) break;
+      await new Promise((ok) => setTimeout(ok, waits[k]));
+    }
+    if (res.status !== 200) throw new GoogleDown(`구글 번역이 응답하지 않습니다 (HTTP ${res.status})`);
     const j = JSON.parse(res.text);
     // 한 덩어리면 ["번역", "ja"], 여러 덩어리면 [["번역", "ja"], …]
     const rows = batch.length === 1 && !Array.isArray(j[0]) ? [j] : j;
@@ -635,8 +645,26 @@ export async function transformArticle(a, mode, deps) {
   const say = deps.progress || (() => {});
   const jobs = { translate, summary };
   const base = { translated: translate, summarized: summary };
+  // 구글 번역이 막히면 원문 그대로 두고, 노트에 표시를 남겨 PC에서 다시 한다
+  const raw = (e) => ({ ...base, title: a.title, markdown: a.markdown, done: false, retry: true, raw: true, warning: `${e.message} — 원문으로 저장했습니다` });
   if (!summary) say("구글 번역 중…");
-  const draft = summary ? null : await translateMarkdown(a, deps.post);
+  let draft = null;
+  if (!summary) {
+    try {
+      draft = await translateMarkdown(a, deps.post);
+    } catch (e) {
+      if (e instanceof GoogleDown) return raw(e);
+      throw e;
+    }
+  }
+  const local = async () => {
+    try {
+      return draft || (await localSummary(a, translate, deps.post));
+    } catch (e) {
+      if (e instanceof GoogleDown) return null;
+      throw e;
+    }
+  };
   if (deps.runClaude) {
     say(summary ? "Claude가 요약하는 중…" : "Claude가 번역을 확인하는 중… (긴 글은 1~2분)");
     const progress = (d, n) => n > 1 && say(`Claude가 번역을 확인하는 중… (${d}/${n})`);
@@ -648,10 +676,16 @@ export async function transformArticle(a, mode, deps) {
       // Claude가 실행되지 않았으면(로그인 만료·사용량 한도·시간 초과) 나중에 다시, 응답했는데 쓸 수 없으면 초안 그대로
       const retry = !(e instanceof ClaudeRefused);
       const what = summary ? "요약하지 못해 핵심 문장 고르기로 대신했습니다" : "번역을 확인하지 못해 구글 번역 그대로 저장했습니다";
-      const r = draft || (await localSummary(a, translate, deps.post));
+      const r = await local();
+      if (!r) return { ...raw(new GoogleDown(`Claude가 ${summary ? "요약" : "번역"}하지 못했고 구글 번역도 응답하지 않습니다 (${e.message || e})`)), retry };
       return { ...base, ...r, done: false, retry, warning: `Claude가 ${what} (${e.message || e})` };
     }
   }
   if (summary) say("요약하는 중…");
-  return { ...base, ...(draft || (await localSummary(a, translate, deps.post))), done: false, retry: true, warning: "" };
+  try {
+    return { ...base, ...(draft || (await localSummary(a, translate, deps.post))), done: false, retry: true, warning: "" };
+  } catch (e) {
+    if (e instanceof GoogleDown) return raw(e);
+    throw e;
+  }
 }
