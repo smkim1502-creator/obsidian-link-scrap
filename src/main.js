@@ -19,11 +19,46 @@ import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
 import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown } from "./transform.js";
 import { claudeRunner, findClaude } from "./claude.js";
-import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine } from "./pending.js";
+import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine, reviewLine, REVIEW_KEY } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
 import { DEFAULT_REASONS, SCRAP_KINDS, copyReasons, searchTitle, fallbackTitle, tabLine, addTabLine } from "./reasons.js";
 import { RS_ID, watchSync } from "./syncnotice.js";
 import { watchFiles, reloadPlugin } from "./selfupdate.js";
+
+// 승인 목록 (옵시디언 Bases). 승인 체크박스가 꺼진 노트 / 아직 Claude를 기다리는 노트 / 승인한 노트
+const REVIEW_BASE = "스크랩 승인";
+const reviewBase = (root) => `filters:
+  and:
+    - file.inFolder(${JSON.stringify(root)})
+    - file.ext == "md"
+views:
+  - type: table
+    name: 승인 대기
+    filters:
+      and:
+        - note["${REVIEW_KEY}"] == false
+    order:
+      - file.name
+      - note.${KEY}
+      - note.${REVIEW_KEY}
+  - type: table
+    name: Claude 확인 대기
+    filters:
+      and:
+        - note["${KEY}"].contains("확인 대기")
+    order:
+      - file.name
+      - note.${KEY}
+  - type: table
+    name: 승인함
+    filters:
+      and:
+        - note["${REVIEW_KEY}"] == true
+    order:
+      - file.name
+      - note.${KEY}
+      - note.${REVIEW_KEY}
+`;
 
 // 입력창·명령에서 "내용을 보고 폴더 고르기"를 뜻하는 값
 const AUTO_FOLDER = "__auto__";
@@ -260,6 +295,19 @@ export default class LinkScrapPlugin extends Plugin {
     desktopCommand("finish-this", "이 노트 Claude로 마무리", () => this.finishActive());
     // 휴대폰에서도 열어 Claude가 확인했는지, 무엇을 고쳤는지 본다
     this.addCommand({ id: "open-claude-log", name: "Claude 확인 기록 열기", callback: () => this.openLog() });
+    // Claude를 거친 번역·요약을 사용자가 읽고 승인하는 목록 (옵시디언 Bases 표)
+    this.addCommand({ id: "open-review", name: "스크랩 승인 목록 열기", callback: () => this.openReview() });
+    this.addCommand({
+      id: "approve-this",
+      name: "이 스크랩 승인",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        const v = file && this.app.metadataCache.getFileCache(file)?.frontmatter?.[REVIEW_KEY];
+        if (v !== false && v !== "false") return false;
+        if (!checking) this.app.fileManager.processFrontMatter(file, (fm) => (fm[REVIEW_KEY] = true)).then(() => new Notice(`승인: ${file.basename}`));
+        return true;
+      },
+    });
 
     // Remotely Save 자동 동기화 알림. Remotely Save가 나중에 켜지거나 다시 켜져도 3초 안에 다시 연결한다
     this.syncWatch = watchSync({
@@ -502,7 +550,8 @@ export default class LinkScrapPlugin extends Plugin {
 
     const when = stamp();
     const status = doneText(note.jobs, r, when);
-    const next = buildNote(note, { title, body, aliases: note.jobs.alias ? aliases : null, status });
+    const review = !!(note.jobs.translate || note.jobs.summary); // 번역·요약은 사용자가 마지막으로 읽고 승인
+    const next = buildNote(note, { title, body, aliases: note.jobs.alias ? aliases : null, status, review });
     let wrote = false;
     // 마무리하는 사이에 노트를 고쳤으면 저장하지 않는다
     await this.app.vault.process(file, (cur) => {
@@ -538,7 +587,7 @@ export default class LinkScrapPlugin extends Plugin {
       if (!note || !note.jobs) return cur;
       jobs = note.jobs;
       const status = [`${jobName(jobs)} 못 함`, when, reason].filter(Boolean).join(" · ");
-      return buildNote(note, { title: note.title, body: note.body, aliases: null, status });
+      return buildNote(note, { title: note.title, body: note.body, aliases: null, status, review: !!(jobs.translate || jobs.summary) });
     });
     if (jobs) await this.logFor(file, { kind: "fail", when, jobs, reason: reason || "이유 없음" });
   }
@@ -602,6 +651,18 @@ export default class LinkScrapPlugin extends Plugin {
     }
     if (file instanceof TFile) await this.app.workspace.getLeaf(false).openFile(file);
     else new Notice("아직 기록이 없습니다. PC 옵시디언에서 Claude가 처음 마무리하면 생깁니다");
+  }
+
+  // 승인 목록: 스크랩 폴더의 Bases 파일. 없으면 만든다 (사용자가 고친 파일은 덮어쓰지 않는다)
+  async openReview() {
+    const root = this.settings.rootFolder || "스크랩";
+    const path = normalizePath(`${root}/${REVIEW_BASE}.base`);
+    let file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      await this.ensureFolder(root);
+      file = await this.app.vault.create(path, reviewBase(root));
+    }
+    await this.app.workspace.getLeaf(false).openFile(file);
   }
 
   // 내용을 보고 스크랩 하위 폴더를 고른다. 실패하면 최상위 폴더
@@ -771,6 +832,8 @@ export default class LinkScrapPlugin extends Plugin {
       if (mark) fm += markerLine(jobs, draftHash({ title, body, aliases }, jobs)) + "\n";
       else if (claudeDone) fm += statusLine(doneText(claudeDone.jobs, claudeDone.r, when)) + "\n";
       else if (claudeFail) fm += statusLine(`${jobName(failJobs)} 못 함 · ${when}`) + "\n";
+      // Claude를 거친 번역·요약은 사용자가 마지막으로 읽고 승인 체크박스를 켠다
+      if (!mark && (claudeDone ? claudeDone.jobs.translate || claudeDone.jobs.summary : claudeFail)) fm += reviewLine() + "\n";
       if (mark && (jobs.translate || jobs.summary)) {
         remarks.push(Platform.isDesktopApp ? "Claude 확인 대기로 표시해 두었습니다. 나중에 다시 마무리합니다" : "PC 옵시디언에서 Claude가 마무리합니다");
       }

@@ -415,3 +415,33 @@ console.log("15 PC 자동 다시 불러오기 OK:", mock.notices.at(-1));
   mock.Platform.isDesktopApp = false;
 }
 console.log("16 구글 막힘 → 원문 + 확인 대기 → PC 마무리 OK:", mock.notices.at(-1));
+
+// 17) 사용자 최종 승인: Claude를 거친 번역·요약 노트에만 '승인: false', 승인 목록(Bases)과 승인 명령
+{
+  const fmOf = (f) => f.data.split("\n---\n")[0];
+  assert.match(fmOf(f6), /^승인: false$/m); // 번역 마무리
+  assert.match(fmOf(f9), /^승인: false$/m); // 요약 마무리(덮어쓰기)
+  assert.ok(!/^승인:/m.test(fmOf(f7)), "별칭만 고친 노트는 승인 대상이 아님");
+  assert.equal((fmOf(f6).match(/^승인:/gm) || []).length, 1);
+  // 승인 목록 열기: 없으면 Bases 파일을 만들고 연다
+  await plugin.openReview();
+  const base = vault.getAbstractFileByPath("스크랩/스크랩 승인.base");
+  assert.ok(base && /note\["승인"\] == false/.test(base.data) && /name: Claude 확인 대기/.test(base.data), base?.data);
+  assert.equal(opened.at(-1), "스크랩/스크랩 승인.base");
+  // 이 스크랩 승인: 승인 대기 노트에서만 보이고, 누르면 true
+  const cmd = plugin.commands.find((c) => c.id === "approve-this");
+  app.workspace.getActiveFile = () => f6;
+  app.fileManager.processFrontMatter = async (file, fn) => {
+    const fm = {};
+    fn(fm);
+    file.data = file.data.replace(/^승인: .*$/m, `승인: ${fm["승인"]}`);
+  };
+  assert.equal(cmd.checkCallback(true), true);
+  cmd.checkCallback(false);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(fmOf(f6), /^승인: true$/m);
+  assert.equal(cmd.checkCallback(true), false);
+  app.workspace.getActiveFile = () => f7;
+  assert.equal(cmd.checkCallback(true), false);
+}
+console.log("17 사용자 승인 OK:", mock.notices.at(-1));

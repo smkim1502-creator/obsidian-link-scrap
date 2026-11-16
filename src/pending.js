@@ -102,10 +102,15 @@ export function parseNote(text) {
 /** frontmatter에 남길 결과 줄: Claude: "번역 확인 완료 · 2026-10-30 14:20 · 42줄 중 12줄 고침" */
 export const statusLine = (text) => `${KEY}: ${JSON.stringify(text)}`;
 
-/** 표시를 지우고(status가 있으면 그 결과 줄로 바꾸고) 별칭을 바꿔 노트를 다시 만든다 */
-export function buildNote(note, { title, body, aliases, status }) {
-  const fm = note.fm.filter((l) => (status ? !l.startsWith(`${KEY}:`) : !LINE.test(l)));
+/** 사용자 최종 확인: Claude를 거친 번역·요약 노트에 체크박스를 달고, 사용자가 읽은 뒤 켠다 */
+export const REVIEW_KEY = "승인";
+export const reviewLine = () => `${REVIEW_KEY}: false`;
+
+/** 표시를 지우고(status가 있으면 그 결과 줄로 바꾸고) 별칭을 바꿔 노트를 다시 만든다. review: 승인 체크박스(꺼짐)를 단다 */
+export function buildNote(note, { title, body, aliases, status, review = false }) {
+  const fm = note.fm.filter((l) => (status ? !l.startsWith(`${KEY}:`) : !LINE.test(l)) && !(review && l.startsWith(`${REVIEW_KEY}:`)));
   if (status) fm.push(statusLine(status));
+  if (review) fm.push(reviewLine());
   if (aliases) {
     const lines = aliases.length ? ["aliases:", ...aliases.map((a) => `  - ${JSON.stringify(a)}`)] : [];
     const i = fm.findIndex((l) => /^aliases:/.test(l));
