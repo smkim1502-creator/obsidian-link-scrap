@@ -63,6 +63,51 @@ console.log("3 용어집에 더하기 OK");
 }
 console.log("4 맥락 확인·찾는 순서 OK");
 
+// 5) 이름 뽑기 결과·위키백과 언어 고르기
+{
+  const { parseNames, wikiLang } = await import("../src/lookup.js");
+  assert.deepEqual(parseNames("1. Bombchu\n- Gold Skulltula\nカービィ → 커비\nBombchu\n없음"), ["Bombchu", "Gold Skulltula", "カービィ"]);
+  assert.equal(wikiLang("パドック"), "ja");
+  assert.equal(wikiLang("Gold Skulltula"), "en");
+}
+console.log("5 이름 뽑기 OK");
+
+// 6) 공식 누리집 비교: 원어판에서 이름이 나오는 부분을 보여 주고, 한국판에 실제로 있는 표기만 받는다
+{
+  const { parseSites, snippets, comparePrompt, parseCompare, htmlText } = await import("../src/lookup.js");
+  assert.deepEqual(parseSites("x → y | 위키백과\n공식 누리집: https://www.nintendo.com/jp/a/ | https://www.nintendo.com/kr/a/"), [{ src: "https://www.nintendo.com/jp/a/", ko: "https://www.nintendo.com/kr/a/" }]);
+  const ja = htmlText('<script>var パドック=1</script><p>レース前は<b>パドック</b>に集まります。</p><img alt="パドックの画面">&amp;');
+  assert.ok(!ja.includes("var") && ja.includes("パドック") && ja.includes("パドックの画面") && ja.endsWith("&"));
+  assert.equal(snippets(ja, "パドック").length, 2);
+  const ko = "레이스 전에는 대기소에 모입니다.";
+  const p = comparePrompt([["パドック", snippets(ja, "パドック")]], ko);
+  assert.ok(p.includes("[パドック]") && p.includes("<한국판>\n레이스 전에는"));
+  const got = parseCompare("パドック → 대기소 | 레이스 전에는 대기소에\nシティトライアル → 시티 트라이얼 | 없는 문장\nほか → 예시장", ["パドック", "シティトライアル", "ほか"], ko);
+  assert.deepEqual([...got], [["パドック", "대기소"]]);
+
+  // 흐름: 검색이 못 찾은 이름을 누리집 비교로 찾는다
+  const found = await findKorean(["パドック"], {
+    title: "エアライダー",
+    getJson: async () => ({ query: { pages: [{ title: "パドック", langlinks: [{ lang: "ko", title: "예시장" }] }] } }),
+    search: async () => "パドック → 없음\n공식 누리집: https://jp.example/ | https://kr.example/",
+    getText: async (url) => (url.includes("kr") ? ko : ja),
+    compare: async () => "パドック → 대기소 | 레이스 전에는 대기소에",
+  });
+  assert.deepEqual([...found], [{ from: "パドック", to: "대기소", source: "공식 누리집 비교 https://kr.example/" }]);
+  assert.deepEqual(found.missed, []);
+}
+console.log("6 공식 누리집 비교 OK");
+
+// 7) 노트 표기 맞추기: 노트에 실제로 있고, 바꿀 표기가 용어집의 정식 표기인 것만
+{
+  const { fixPrompt, parseFixPairs } = await import("../src/lookup.js");
+  const terms = [["Bombchu", "봄추"], ["Gold Skulltula", "황금 스타르츄라"]];
+  const body = "# 봄츄 볼링\n\n황금 스컬트라와 봄츄.";
+  assert.ok(fixPrompt(body, terms).includes("Bombchu → 봄추"));
+  assert.deepEqual(parseFixPairs("봄츄 → 봄추\n- 황금 스컬트라 → 황금 스타르츄라\n없는말 → 봄추\n볼링 → 공굴리기\n봄추 → 봄추", body, terms), [["황금 스컬트라", "황금 스타르츄라"], ["봄츄", "봄추"]]);
+}
+console.log("7 노트 표기 맞추기 OK");
+
 if (process.argv.includes("--real")) {
   const { wikiUrl } = await import("../src/lookup.js");
   const names = ["カービィ", "バンダイナムコスタジオ", "宮本茂", "パドック"];

@@ -462,7 +462,7 @@ console.log("18 번역 용어집 OK");
   const asked = [];
   const run = async (prompt, opts = {}) => {
     asked.push({ prompt, tools: opts.tools || "" });
-    if (/고유명사 가운데 한자·가나로 쓴 것/.test(prompt)) return "カービィ → 카비\nパドック → 패독\nシティトライアル → 시티 트라이얼";
+    if (/원문 표기 그대로 뽑는다/.test(prompt)) return "カービィ\nパドック\nシティトライアル";
     return "カービィ → 커비 | 위키백과\nパドック → 없음\nシティトライアル → 시티 트라이얼 | https://www.nintendo.com/kr/games/switch2/aaaba/products/soft.html";
   };
   const a = { title: "『カービィのエアライダー』の最適化", markdown: "カービィがパドックに集まる。シティトライアルでは描画負荷が高まります。".repeat(3) };
@@ -477,7 +477,33 @@ console.log("18 번역 용어집 OK");
   assert.ok(asked.find((x) => x.tools).prompt.includes("글 제목: 『カービィのエアライダー』の最適化"));
   // 한국어·영어 글이면 찾지 않는다
   asked.length = 0;
-  await plugin.termsFor({ title: "Weird", markdown: "plain English text" }, run);
+  await plugin.termsFor({ title: "한국어 글", markdown: "한국어로 쓴 글이라 찾을 것이 없다." }, run);
   assert.equal(asked.length, 0);
 }
 console.log("19 한국 정식 명칭 찾기 OK");
+
+// 20) 이미 만든 노트의 고유명사 표기를 정식 표기로 맞추기 (영어 글)
+{
+  mock.Platform.isDesktopApp = true;
+  const run = async (prompt, opts = {}) => {
+    if (/원문 표기 그대로 뽑는다/.test(prompt)) return "Bombchu\nGold Skulltula";
+    if (opts.tools) return "Bombchu → 봄추 | https://www.nintendo.com/kr/x\nGold Skulltula → 황금 스타르츄라 | https://www.nintendo.com/kr/y";
+    if (/노트에서 <표기>의 대상을/.test(prompt)) return "봄츄 → 봄추\n황금 스컬트라 → 황금 스타르츄라\n없는말 → 봄추\n볼링 → 공굴리기";
+    return "없음";
+  };
+  plugin.claude = () => run;
+  const realFetch = plugin.fetchArticle;
+  plugin.fetchArticle = async () => ({ kind: "article", title: "Ocarina remake: Bombchu bowling", markdown: "The Bombchu Bowling owner. Collect 100 Gold Skulltula tokens." });
+  const f = await vault.create("스크랩/게임/봄츄 볼링 이야기.md", `---\nurl: https://example.com/zelda\nClaude: "번역·요약 완료 · 2026-11-18 23:59"\n승인: true\n---\n# 봄츄 볼링 이야기\n\n- 봄츄 볼링 주인의 근황.\n- 황금 스컬트라 100마리를 모은다. 봄츄를 준다.\n`);
+  const pairs = await plugin.recheckTerms(f);
+  plugin.fetchArticle = realFetch;
+  assert.deepEqual(pairs, [["황금 스컬트라", "황금 스타르츄라", 1], ["봄츄", "봄추", 3]]);
+  assert.equal(f.path, "스크랩/게임/봄추 볼링 이야기.md");
+  assert.ok(/^# 봄추 볼링 이야기$/m.test(f.data) && f.data.includes("황금 스타르츄라 100마리") && !f.data.includes("봄츄") && f.data.includes("볼링"), f.data);
+  assert.match(f.data, /^승인: false$/m); // 내용이 바뀌었으니 다시 승인
+  assert.match(f.data, /^Claude: "번역·요약 완료/m);
+  const e = entryOf("봄추 볼링 이야기");
+  assert.ok(e.includes("고유명사 표기 맞춤 · 2가지") && e.includes("- ~~봄츄~~ → 봄추 (3곳)"), e);
+  mock.Platform.isDesktopApp = false;
+}
+console.log("20 노트 고유명사 맞추기 OK");

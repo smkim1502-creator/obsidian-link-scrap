@@ -72,6 +72,10 @@ export function formatEntry(o) {
   } else if (o.kind === "skip") {
     out.push(`${job} 건너뜀 · 초안을 만든 뒤 노트를 고친 흔적이 있어 그대로 둠`);
     out.push("- PC에서 노트를 열고 명령 '이 노트 Claude로 마무리'를 실행하면 Claude 결과로 바뀐다 (고친 내용은 사라진다)");
+  } else if (o.kind === "terms") {
+    // 이미 만든 노트의 고유명사 표기를 정식 표기로 맞춤
+    out.push(o.pairs.length ? `고유명사 표기 맞춤 · ${o.pairs.length}가지` : "고유명사 표기 확인 · 고칠 표기 없음");
+    out.push(...o.pairs.map(([from, to, n]) => `- ~~${from}~~ → ${to}${n > 1 ? ` (${n}곳)` : ""}`));
   } else if (o.kind === "fail") {
     out.push(`${job} 못 함 · ${o.reason}`);
     out.push("- 초안 그대로가 최종본이다");

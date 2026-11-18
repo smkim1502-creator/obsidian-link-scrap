@@ -18,7 +18,7 @@ import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
 import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms, claudeGlossary } from "./transform.js";
-import { findKorean, addAuto } from "./lookup.js";
+import { findKorean, addAuto, namesPrompt, parseNames, htmlText, fixPrompt, parseFixPairs } from "./lookup.js";
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine, reviewLine, REVIEW_KEY } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
@@ -305,6 +305,19 @@ export default class LinkScrapPlugin extends Plugin {
       if (!this.scanPending(0)) new Notice("Claude 확인 대기 노트가 없습니다");
     });
     desktopCommand("finish-this", "이 노트 Claude로 마무리", () => this.finishActive());
+    desktopCommand("recheck-terms", "이 노트 고유명사 정식 표기로 맞추기", async () => {
+      const file = this.app.workspace.getActiveFile();
+      if (!file) return new Notice("스크랩 노트를 열어 주세요");
+      const notice = new Notice(`「${file.basename}」 표기 확인 중…`, 0);
+      try {
+        const pairs = await this.recheckTerms(file, { say: (m) => notice.setMessage(m) });
+        new Notice(pairs.length ? `고친 표기 ${pairs.length}가지: ${pairs.map(([f, t]) => `${f} → ${t}`).join(", ")}` : "고칠 표기가 없습니다", 10000);
+      } catch (e) {
+        new Notice(`표기를 맞추지 못했습니다 (${e.message || e})`, 10000);
+      } finally {
+        notice.hide();
+      }
+    });
     // 휴대폰에서도 열어 Claude가 확인했는지, 무엇을 고쳤는지 본다
     this.addCommand({ id: "open-claude-log", name: "Claude 확인 기록 열기", callback: () => this.openLog() });
     // Claude를 거친 번역·요약을 사용자가 읽고 승인하는 목록 (옵시디언 Bases 표)
@@ -684,23 +697,69 @@ export default class LinkScrapPlugin extends Plugin {
     }
   }
 
-  // 한자·가나 글을 번역할 때: 글의 고유명사를 뽑아 한국 정식 명칭을 찾고(위키백과 → 웹 검색) 용어집에 더한 뒤 용어집 전체를 돌려준다
+  // 이미 만든 번역·요약 노트의 고유명사 표기를 정식 표기로 맞춘다 (원문을 다시 받아 정식 표기를 찾고, 노트에서 다르게 쓴 곳만 바꾼다)
+  async recheckTerms(file, { say = () => {} } = {}) {
+    const run = this.claude();
+    if (!run) throw new Error("PC에서 Claude로 마무리가 켜져 있어야 합니다");
+    const text = await this.app.vault.read(file);
+    const note = parseNote(text);
+    if (!note?.url) throw new Error("url 속성이 있는 스크랩 노트가 아닙니다");
+    say("원문을 다시 가져오는 중…");
+    const a = await this.fetchArticle(note.url);
+    if (a.kind !== "article") throw new Error("원문 본문을 찾지 못했습니다");
+    const src = `${a.title}\n${a.markdown}`;
+    const terms = (await this.termsFor(a, run, say)).filter(([from]) => src.includes(from));
+    const body = `# ${note.title}\n\n${note.body}`;
+    let pairs = [];
+    if (terms.length) {
+      say("노트의 표기를 맞추는 중…");
+      pairs = parseFixPairs(await run(fixPrompt(body, terms), { system: "Write the entire output in Korean." }), body, terms);
+    }
+    const counted = pairs.map(([f, t]) => [f, t, body.split(f).length - 1]);
+    if (pairs.length) {
+      const fix = (s) => pairs.reduce((acc, [f, t]) => acc.split(f).join(t), s);
+      const title = fix(note.title);
+      // 내용이 바뀌었으니 승인은 다시 받는다
+      const next = buildNote(note, { title, body: fix(note.body), aliases: null, status: null, review: true });
+      let wrote = false;
+      await this.app.vault.process(file, (cur) => {
+        if (cur.replace(/\r\n/g, "\n") !== text.replace(/\r\n/g, "\n")) return cur;
+        wrote = true;
+        return next;
+      });
+      if (!wrote) throw new Error("맞추는 사이에 노트가 바뀌어 저장하지 않았습니다");
+      const name = safeFileName(title);
+      if (name && name !== file.basename) {
+        const folder = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+        await this.app.fileManager.renameFile(file, this.uniquePath(folder, name, "md"));
+      }
+    }
+    await this.logFor(file, { kind: "terms", pairs: counted, jobs: { translate: true } });
+    return counted;
+  }
+
+  // 외국어 글을 번역할 때: 글의 고유명사·게임 용어를 뽑아 한국 정식 표기를 찾고(위키백과 → 웹 검색 → 공식 누리집 비교) 용어집에 더한 뒤 용어집 전체를 돌려준다
   async termsFor(a, run, say = () => {}) {
     const known = await this.terms();
-    const kana = (`${a.title}\n${a.markdown}`.match(/[぀-ヿ㐀-鿿]/g) || []).length;
-    if (!run || kana < 30) return known;
+    if (!run || isKorean(`${a.title}\n${a.markdown}`)) return known;
     try {
       say("한국 정식 명칭을 찾는 중…");
       const have = new Set(known.map(([f]) => f));
-      const listed = await claudeGlossary({ a, src: a.markdown.split("\n").filter((l) => l.trim()) }, run);
-      const names = listed
-        .split("\n")
-        .map((l) => l.split("→")[0].trim())
-        .filter((n) => n && !have.has(n));
+      // 최근 30일 안에 찾아봤는데 없던 이름은 다시 검색하지 않는다 (구독 사용량 절약)
+      const miss = this.settings.termMiss || {};
+      const fresh = (n) => !miss[n] || Date.now() - miss[n] > 30 * 86400000;
+      const names = parseNames(await run(namesPrompt(a), { system: "Output only the requested list." })).filter((n) => !have.has(n) && fresh(n));
       if (!names.length) return known;
       const getJson = async (url) => JSON.parse((await requestUrl({ url, headers: { "User-Agent": "link-scrap (Obsidian plugin)" } })).text);
+      const getText = async (url) => htmlText((await requestUrl({ url, headers: { "User-Agent": USER_AGENT } })).text);
       const search = (prompt) => run(prompt, { tools: "WebSearch", system: "Write the entire output in Korean." });
-      const found = await findKorean(names, { getJson, search, title: a.title });
+      const compare = (prompt) => run(prompt, { system: "Write the entire output in Korean." });
+      const found = await findKorean(names, { getJson, search, compare, getText, title: a.title });
+      if (found.missed?.length) {
+        for (const n of found.missed) miss[n] = Date.now();
+        this.settings.termMiss = miss;
+        await this.saveData(this.settings);
+      }
       if (!found.length) return known;
       let file = this.app.vault.getAbstractFileByPath(this.termsPath());
       if (!(file instanceof TFile)) {

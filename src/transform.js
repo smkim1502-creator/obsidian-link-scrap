@@ -364,7 +364,11 @@ export function applyTerms(s, terms) {
   if (!s || !terms?.length) return s;
   const marks = [];
   // 한 번 바꾼 자리는 다른 항목이 다시 바꾸지 않게 잠깐 자리표시로 둔다
-  for (const [from, to] of terms) s = s.split(from).join(`\u0000${marks.push(to) - 1}\u0000`);
+  for (const [from, to] of terms) {
+    // 로마자만으로 된 원어(Link, Switch)는 결과에서 바꾸지 않는다 — 링크 주소·영어 낱말 속을 건드릴 수 있다. 지시문으로만 알린다
+    if (/^[\x20-\x7e]+$/.test(from)) continue;
+    s = s.split(from).join(`\u0000${marks.push(to) - 1}\u0000`);
+  }
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => marks[i]);
 }
 

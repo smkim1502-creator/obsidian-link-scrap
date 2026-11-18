@@ -9,7 +9,9 @@ console.log("1 읽기 OK");
 
 // 2) 바꾸기: 잘못 옮긴 한국어 표기와 남은 원어를 바꾸고, 바꾼 결과를 다시 바꾸지 않는다
 assert.equal(applyTerms("『카비의 에어라이더』와 星のカービィ, カービィ", terms), "『커비의 에어라이더』와 별의 커비, 커비");
-assert.equal(applyTerms("A → B", [["A", "AB"], ["B", "C"]]), "AB → C");
+assert.equal(applyTerms("가 → 나", [["가", "가나"], ["나", "다"]]), "가나 → 다");
+// 로마자 원어는 결과에서 바꾸지 않는다 (링크 주소·영어 낱말 보호)
+assert.equal(applyTerms("[Link](https://x/Link) 봄츄", [["Link", "링크"], ["봄츄", "봄추"]]), "[Link](https://x/Link) 봄추");
 assert.equal(applyTerms("그대로", []), "그대로");
 console.log("2 바꾸기 OK");
 
