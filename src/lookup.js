@@ -7,6 +7,7 @@
 
 export const AUTO_HEAD = "## 자동으로 찾은 표기";
 const SEARCH_MAX = 25; // 웹 검색 한 번에 맡길 이름 수
+const FAN_MAX = 30; // 팬 위키에서 찾아볼 이름 수
 const CJK = /[぀-ヿ㐀-鿿]/;
 
 /** 위키백과 응답에서 이름 → 한국어 문서 제목. "커비 (캐릭터)"처럼 붙은 구분 괄호는 뗀다 */
@@ -25,6 +26,39 @@ export function wikiKorean(json, names) {
   return out;
 }
 
+/** 위키백과 응답에서 이름 → 실제 문서 제목 (넘겨주기를 따라간 끝) */
+export function wikiTargets(json, names) {
+  const q = json?.query || {};
+  const next = Object.fromEntries([...(q.normalized || []), ...(q.redirects || [])].map((r) => [r.from, r.to]));
+  const out = new Map();
+  for (const n of names) {
+    let t = n;
+    for (let i = 0; i < 5 && next[t]; i++) t = next[t];
+    out.set(n, t);
+  }
+  return out;
+}
+
+/**
+ * 원문이 시리즈 이름을 뺀 짧은 이름이면 문서 제목 앞의 시리즈 이름 (Ocarina of Time → "The Legend of Zelda: Ocarina of Time" → "The Legend of Zelda")
+ * 한국어도 시리즈 이름을 빼고 써야 한다 (시간의 오카리나, 바람의 지휘봉)
+ */
+export function seriesOf(target, name) {
+  if (!target || target === name) return "";
+  const i = target.toLowerCase().lastIndexOf(name.toLowerCase().replace(/^the\s+/, ""));
+  if (i <= 0) return "";
+  const pre = target.slice(0, i);
+  const s = (/[:：]/.test(pre) ? pre.split(/[:：]/)[0] : pre).trim();
+  return s.length >= 2 && !name.toLowerCase().includes(s.toLowerCase()) ? s : "";
+}
+
+/** 한국어 제목에서 시리즈 이름을 뗀다. 떼고 남는 것이 없으면 그대로 */
+export function stripSeries(ko, seriesKo) {
+  if (!seriesKo || !ko.startsWith(seriesKo)) return ko;
+  const rest = ko.slice(seriesKo.length).replace(/^[\s:：\-–]+/, "").trim();
+  return rest && /[가-힯]/.test(rest) ? rest : ko;
+}
+
 /** 이름에 맞는 위키백과 (한자·가나 → 일본어판, 그 밖 → 영어판) */
 export const wikiLang = (name) => (CJK.test(name) ? "ja" : "en");
 
@@ -38,6 +72,7 @@ export function namesPrompt(a) {
 - 대상: 게임·작품·회사·인물·캐릭터·지명의 이름, 그리고 게임 속 용어(장소·던전·아이템·적·기술·모드·메뉴 이름)
 - 보통 낱말, 일반 개념(예: open world, frame rate), 매체·기자 이름은 넣지 않는다
 - 한 줄에 하나, 원문 표기만 쓴다. 번역이나 설명은 쓰지 않는다. 없으면 "없음"만 쓴다
+- 원문 표기가 영어가 아니면(일본어 등) 영어판 공식 이름을 알 때만 "원문 표기 | 영어판 이름"으로 쓴다 (예: 時のオカリナ | Ocarina of Time)
 
 <글>
 # ${a.title}
@@ -47,15 +82,88 @@ ${a.markdown}
 `;
 }
 
+const nameLines = (out) =>
+  String(out || "")
+    .split("\n")
+    .map((l) => l.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").replace(/\s*→.*$/, "").trim())
+    .filter((l) => l && !/^없음/.test(l));
+
 export function parseNames(out) {
-  return [
-    ...new Set(
-      String(out || "")
-        .split("\n")
-        .map((l) => l.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").replace(/\s*→.*$/, "").trim())
-        .filter((l) => l && l.length <= 60 && !/^없음/.test(l))
-    ),
-  ];
+  return [...new Set(nameLines(out).map((l) => l.split("|")[0].trim()).filter((l) => l && l.length <= 60))];
+}
+
+/** 일본어 등 원문 이름 → 영어판 이름 (팬 위키 문서 제목을 찾는 데 쓴다) */
+export function parseEnglish(out) {
+  const m = new Map();
+  for (const l of nameLines(out)) {
+    const [a, b] = l.split("|").map((x) => x.trim());
+    if (a && b && /^[\x20-\x7e]+$/.test(b)) m.set(a, b);
+  }
+  return m;
+}
+
+// ---------- 팬 위키: 게임 팬 위키 문서의 "다른 언어 이름" 표에 한국어판 이름이 있다 (Bombchu → 찍폭탄, Paddock → 대기소) ----------
+
+export const FAN_WIKIS = [
+  { re: /zelda|hyrule|ゼルダ|ハイラル/i, name: "Zelda Wiki", api: "https://zeldawiki.wiki/w/api.php" },
+  { re: /kirby|カービィ/i, name: "WiKirby", api: "https://wikirby.com/w/api.php" },
+  { re: /pok[eé]mon|ポケモン|ポケットモンスター/i, name: "Bulbapedia", api: "https://bulbapedia.bulbagarden.net/w/api.php" },
+  { re: /mario|luigi|yoshi|donkey kong|マリオ|ルイージ|ヨッシー|ドンキーコング/i, name: "Super Mario Wiki", api: "https://www.mariowiki.com/api.php" },
+  { re: /splatoon|スプラトゥーン/i, name: "Inkipedia", api: "https://splatoonwiki.org/w/api.php" },
+  { re: /xenoblade|ゼノブレイド/i, name: "Xeno Series Wiki", api: "https://www.xenoserieswiki.org/w/api.php" },
+  { re: /metroid|samus|メトロイド/i, name: "Metroid Wiki", api: "https://www.metroidwiki.org/w/api.php" },
+  { re: /fire emblem|ファイアーエムブレム/i, name: "Fire Emblem Wiki", api: "https://fireemblemwiki.org/w/api.php" },
+  { re: /smash bros|大乱闘|スマブラ/i, name: "SmashWiki", api: "https://www.ssbwiki.com/api.php" },
+];
+
+/**
+ * 글에 맞는 팬 위키: 시리즈 이름이 가장 많이 나오는 하나만.
+ * 둘째 위키까지 보면 같은 이름의 다른 게임 물건을 가져온다 (젤다 글의 Iron Boots → 마리오 위키의 아이언점프)
+ */
+export function fanWikisFor(text) {
+  return FAN_WIKIS.map((w) => [w, (String(text).match(new RegExp(w.re.source, "gi")) || []).length])
+    .filter(([, n]) => n)
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 1)
+    .map(([w]) => w);
+}
+
+export const fanUrl = (api, page) => `${api}?` + new URLSearchParams({ action: "parse", page, prop: "text", format: "json", formatversion: "2", redirects: "1" });
+
+/** 팬 위키 문서에서 한글이 있는 줄과 그 앞 두 줄 (언어 이름 표의 "Korea" 칸) */
+export function fanSnippets(text, max = 12) {
+  const lines = String(text || "").split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length && out.length < max; i++) {
+    if (!/[가-힯]/.test(lines[i])) continue;
+    out.push(lines.slice(Math.max(0, i - 2), i + 1).join(" / ").replace(/\s+/g, " ").slice(0, 200));
+  }
+  return out;
+}
+
+export function fanPrompt(items) {
+  return `아래는 게임 팬 위키 문서에서 한글이 나오는 부분이다. 대부분 "다른 언어 이름" 표의 한국어판(Korea) 칸이다.
+이름마다 한국어판 게임에서 쓰는 공식 이름을 고른다.
+- 한 줄에 "원어 → 한국어판 이름"
+- 보여 준 글자 그대로 쓴다. 한국어판 이름으로 볼 수 없으면(설명 문장, 다른 대상의 이름) "원어 → 없음"
+- 설명은 덧붙이지 않는다
+
+${items.map(([name, page, lines]) => `[${name}] (${page})\n${lines.join("\n")}`).join("\n\n")}
+`;
+}
+
+/** 팬 위키 결과: 보여 준 부분에 실제로 있는 표기만 */
+export function parseFan(out, items) {
+  const by = new Map(items.map(([name, , lines]) => [name, lines.join("\n")]));
+  const found = new Map();
+  for (const raw of String(out || "").split("\n")) {
+    const m = raw.replace(/^\s*[-*]\s*/, "").match(/^(.+?)\s*→\s*([^|]+?)\s*(?:\|.*)?$/);
+    if (!m || !by.has(m[1].trim())) continue;
+    const to = m[2].replace(/\*\*/g, "").trim();
+    if (!to || /^없음/.test(to) || !/[가-힯]/.test(to) || to.length > 40 || !by.get(m[1].trim()).includes(to)) continue;
+    found.set(m[1].trim(), to);
+  }
+  return found;
 }
 
 /** 확인·검색 지시문. wiki: 위키백과로 찾은 후보(맥락이 맞는지 확인), rest: 웹 검색으로 찾을 이름 */
@@ -74,6 +182,8 @@ ${wiki.map(([f, t]) => `${f} → ${t}`).join("\n")}
 - 정식 표기는 한국에 공식으로 발매·발표된 표기다. 게임이면 그 게임의 한국어판 공식 누리집(한국닌텐도 nintendo.com/kr 등), 한국어판 설명서·소개 영상, 한국 공식 발표를 근거로 한다
 - 게임 속 용어(장소·아이템·적·모드)는 같은 게임의 원어 공식 누리집(일본·미국)과 한국 공식 누리집에서 같은 내용을 설명하는 부분을 찾아 비교한다. 예: 일본 누리집에서 パドック를 설명하는 문장이 한국 누리집에서는 대기소로 쓰여 있으면 パドック → 대기소
 - 같은 게임의 이전 한국어판(예: 3DS판)에서 쓴 표기도 근거가 된다
+- 공식 자료에서 못 찾으면 팬 위키(나무위키, Zelda Wiki·WiKirby·Bulbapedia 같은 게임 팬 위키의 다른 언어 이름 표)에 적힌 한국어판 표기도 근거가 된다
+- 원문이 시리즈 이름을 뺀 짧은 이름이면 한국어도 짧은 이름으로 쓴다 (Ocarina of Time → 시간의 오카리나, Wind Waker → 바람의 지휘봉)
 - 찾으면 "원어 → 한국 정식 표기 | 근거 주소", 근거 주소에서 확인하지 못했으면 "원어 → 없음". 추측하거나 발음대로 옮기지 않는다
 ${rest.join("\n")}
 
@@ -85,6 +195,18 @@ ${rest.join("\n")}
 
 ${a}${b}한 줄에 하나씩 "원어 → 표기 | 근거" 형식으로만 쓰고 설명은 덧붙이지 않는다.
 글이 다루는 게임의 공식 누리집을 찾았으면 맨 끝에 "공식 누리집: 원어판 주소 | 한국판 주소" 한 줄을 쓴다(원어판은 nintendo.com/jp·nintendo.co.jp·nintendo.com/us 등, 한국판은 nintendo.com/kr 등, 게임 소개 첫 페이지). 게임이 여럿이면 줄을 여럿 쓴다.
+`;
+}
+
+/** 나무위키 검색 지시문 (앞 단계에서 못 찾은 이름만) */
+export function namuPrompt(title, names) {
+  return `글 제목: ${title}
+
+이 글이 다루는 게임·작품에 나오는 아래 이름의 한국어판 표기를 나무위키에서 찾는다. 웹 검색으로 "나무위키 <게임 이름> <이름>"이나 namu.wiki의 그 게임 문서(등장인물·몬스터·던전·아이템·지역 문서)를 찾아, 문서에 적힌 한국어판 이름을 쓴다.
+- 한 줄에 "원어 → 한국어판 표기 | 근거 주소"
+- 원문이 시리즈 이름을 뺀 짧은 이름이면 한국어도 짧은 이름으로 쓴다
+- 한국어판 표기를 확인하지 못하면 "원어 → 없음". 추측하거나 발음대로 옮기지 않는다
+${names.join("\n")}
 `;
 }
 
@@ -162,7 +284,8 @@ export function parseSearch(out, names) {
   const found = new Map();
   for (const raw of String(out || "").split("\n")) {
     const line = raw.replace(/^\s*[|*-]\s*/, "").trim();
-    const m = line.match(/^(.+?)\s*→\s*(.+?)\s*\|\s*(https?:\/\/\S+?|위키백과)\s*\|?\s*$/);
+    // 근거 뒤에 "(…)" 같은 말을 덧붙여 와도 받는다
+    const m = line.match(/^(.+?)\s*→\s*(.+?)\s*\|\s*(https?:\/\/[^\s|]+|위키백과)(?:\s.*)?\|?\s*$/);
     if (!m || !want.has(m[1].trim())) continue;
     const to = m[2].replace(/\*\*/g, "").trim();
     if (!to || /^없음/.test(to) || !/[가-힯]/.test(to) || to.length > 60) continue;
@@ -187,17 +310,33 @@ export function addAuto(text, entries) {
  * @param {{getJson:(url:string)=>Promise<any>, search?:(prompt:string)=>Promise<string>, title?:string}} deps
  * @returns {Promise<{from:string, to:string, source:string}[]>}
  */
-export async function findKorean(names, { getJson, search, compare, getText, title = "" }) {
+export async function findKorean(names, { getJson, search, compare, getText, title = "", english = new Map(), fan = [] }) {
   const all = [...new Set(names)].filter(Boolean);
   const wiki = new Map();
   for (const lang of ["ja", "en"]) {
     const mine = all.filter((n) => wikiLang(n) === lang);
+    const series = new Map(); // 이름 → 시리즈 이름 (짧은 이름으로 쓴 경우)
     for (let i = 0; i < mine.length; i += 50) {
       const part = mine.slice(i, i + 50);
       try {
-        for (const [from, to] of wikiKorean(await getJson(wikiUrl(part, lang)), part)) wiki.set(from, to);
+        const json = await getJson(wikiUrl(part, lang));
+        for (const [from, to] of wikiKorean(json, part)) wiki.set(from, to);
+        for (const [from, t] of wikiTargets(json, part)) {
+          const s = seriesOf(t, from);
+          if (s && wiki.has(from)) series.set(from, s);
+        }
       } catch (e) {
         // 위키백과가 안 되면 웹 검색으로 넘긴다
+      }
+    }
+    // 짧은 이름이면 한국어 제목에서도 시리즈 이름을 뗀다 (젤다의 전설 바람의 지휘봉 → 바람의 지휘봉)
+    const sNames = [...new Set(series.values())];
+    if (sNames.length) {
+      try {
+        const sKo = wikiKorean(await getJson(wikiUrl(sNames.slice(0, 50), lang)), sNames);
+        for (const [from, s] of series) wiki.set(from, stripSeries(wiki.get(from), sKo.get(s)));
+      } catch (e) {
+        // 시리즈 이름을 못 찾으면 그대로 둔다 (Claude 확인에서 짧게 고칠 수 있다)
       }
     }
   }
@@ -238,11 +377,85 @@ export async function findKorean(names, { getJson, search, compare, getText, tit
       }
     }
   }
+  // 그래도 못 찾은 이름은 게임 팬 위키 문서의 다른 언어 이름 표에서 한국어판 이름을 찾는다
+  if (compare && fan.length) {
+    const left = all.filter((n) => !found.some((f) => f.from === n)).slice(0, FAN_MAX);
+    const items = [];
+    await Promise.all(
+      left.map(async (n) => {
+        const page = english.get(n) || (/^[\x20-\x7e]+$/.test(n) ? n : "");
+        if (!page) return;
+        for (const w of fan) {
+          try {
+            const j = await getJson(fanUrl(w.api, page));
+            const lines = fanSnippets(htmlText(j?.parse?.text || ""));
+            if (lines.length) return items.push([n, `${w.name}: ${j.parse.title || page}`, lines, w]);
+          } catch (e) {
+            // 문서가 없으면 다음 위키
+          }
+        }
+      })
+    );
+    if (items.length) {
+      try {
+        for (const [from, to] of parseFan(await compare(fanPrompt(items)), items)) {
+          const it = items.find((x) => x[0] === from);
+          found.push({ from, to, source: `팬 위키 ${it[3].name} ${it[3].api.replace(/\/(w\/)?api\.php$/, "")}/wiki/${encodeURIComponent((english.get(from) || from).replace(/ /g, "_"))}` });
+        }
+      } catch (e) {
+        // 실패하면 건너뛴다
+      }
+    }
+  }
+  // 마지막으로 나무위키: 한국어판 게임 문서(등장인물·몬스터·던전 문서)에 표기가 정리되어 있다. 이름만 좁혀 따로 검색해야 찾는다
+  const left = all.filter((n) => !found.some((f) => f.from === n)).slice(0, SEARCH_MAX);
+  if (left.length) {
+    try {
+      for (const [from, v] of parseSearch(await search(namuPrompt(title, left)), left)) {
+        if (v.url !== "위키백과") found.push({ from, to: v.to, source: `${/namu\.wiki/.test(v.url) ? "나무위키" : "웹 검색"} ${v.url}` });
+      }
+    } catch (e) {
+      // 실패하면 건너뛴다
+    }
+  }
   found.missed = [...wiki.keys(), ...rest].filter((n) => !found.some((f) => f.from === n));
   return found;
 }
 
 // ---------- 이미 만든 노트의 표기 맞추기 ----------
+
+// 받침 있는지 (한글 음절만. 숫자·영문으로 끝나면 판단하지 않는다)
+const batchim = (ch) => {
+  const c = ch.charCodeAt(0) - 0xac00;
+  return c >= 0 && c < 11172 ? c % 28 : -1; // -1: 한글 아님, 0: 받침 없음, 8: ㄹ받침
+};
+const PARTICLES = [
+  ["을", "를"],
+  ["이", "가"],
+  ["은", "는"],
+  ["과", "와"],
+  ["이랑", "랑"],
+  ["으로", "로"],
+];
+
+/** 표기를 바꾸고 바로 뒤 조사를 새 표기의 받침에 맞춘다 (봄츄를 → 찍폭탄을) */
+export function replaceName(s, from, to) {
+  const b = batchim(to.slice(-1));
+  return s.split(from).reduce((acc, part, i) => {
+    if (i === 0) return part;
+    let p = part;
+    if (b >= 0) {
+      for (const [withB, noB] of PARTICLES) {
+        const m = p.match(new RegExp(`^(${withB}|${noB})(?![가-힯])`)) || (withB === "으로" ? p.match(/^(으로|로)/) : null);
+        if (!m) continue;
+        const want = withB === "으로" ? (b === 0 || b === 8 ? noB : withB) : b ? withB : noB;
+        p = want + p.slice(m[1].length);
+        break;
+      }
+    }
+    return acc + to + p;
+  }, "");
+}
 
 /** 노트에서 정식 표기와 다르게 쓴 곳을 찾는 지시문 */
 export function fixPrompt(noteBody, terms) {
@@ -251,6 +464,7 @@ export function fixPrompt(noteBody, terms) {
 - 한 줄에 "노트의 표기 → 정식 표기"
 - 노트의 표기는 노트에 있는 글자 그대로 쓴다(조사는 빼고 이름만). 이미 정식 표기면 쓰지 않는다
 - <표기>에 없는 대상은 고치지 않는다. 고칠 것이 없으면 "없음"만 쓴다
+- 같은 대상의 긴 이름(시리즈 이름 포함)과 짧은 이름이 둘 다 <표기>에 있으면 어느 쪽이든 정식이다. 그런 곳은 고치지 않는다
 
 <표기>
 ${terms.map(([f, t]) => `${f} → ${t}`).join("\n")}

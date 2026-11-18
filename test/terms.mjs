@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { parseTerms, termLines, applyTerms, claudePrompt, finishDraft, transformArticle } from "../src/transform.js";
 
 // 1) 읽기: "- A → B", "->", "=" 를 받고 제목·설명·빈 줄은 건너뛴다. 긴 표기부터
-const terms = parseTerms("# 번역 용어집\n\n설명 줄 - 무시 → 안 됨\n- カービィ → 커비\n* 카비 -> 커비\n- 星のカービィ = 별의 커비\n- 같음 → 같음\n");
+const terms = parseTerms("# 번역 용어집\n\n설명 줄 - 무시 → 안 됨\n- カービィ → 커비\n* 카비 -> 커비\n- 星のカービィ = 별의 커비\n");
 assert.deepEqual(terms, [["星のカービィ", "별의 커비"], ["カービィ", "커비"], ["카비", "커비"]]);
+// 같은 표기는 "그대로 둔다"
+assert.deepEqual(parseTerms("- 3DS → 3DS\n"), [["3DS", "3DS"]]);
 console.log("1 읽기 OK");
 
 // 2) 바꾸기: 잘못 옮긴 한국어 표기와 남은 원어를 바꾸고, 바꾼 결과를 다시 바꾸지 않는다

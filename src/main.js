@@ -18,7 +18,7 @@ import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
 import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms, claudeGlossary } from "./transform.js";
-import { findKorean, addAuto, namesPrompt, parseNames, htmlText, fixPrompt, parseFixPairs } from "./lookup.js";
+import { findKorean, addAuto, namesPrompt, parseNames, parseEnglish, fanWikisFor, htmlText, fixPrompt, parseFixPairs, replaceName } from "./lookup.js";
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine, reviewLine, REVIEW_KEY } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
@@ -717,7 +717,7 @@ export default class LinkScrapPlugin extends Plugin {
     }
     const counted = pairs.map(([f, t]) => [f, t, body.split(f).length - 1]);
     if (pairs.length) {
-      const fix = (s) => pairs.reduce((acc, [f, t]) => acc.split(f).join(t), s);
+      const fix = (s) => pairs.reduce((acc, [f, t]) => replaceName(acc, f, t), s);
       const title = fix(note.title);
       // 내용이 바뀌었으니 승인은 다시 받는다
       const next = buildNote(note, { title, body: fix(note.body), aliases: null, status: null, review: true });
@@ -748,13 +748,16 @@ export default class LinkScrapPlugin extends Plugin {
       // 최근 30일 안에 찾아봤는데 없던 이름은 다시 검색하지 않는다 (구독 사용량 절약)
       const miss = this.settings.termMiss || {};
       const fresh = (n) => !miss[n] || Date.now() - miss[n] > 30 * 86400000;
-      const names = parseNames(await run(namesPrompt(a), { system: "Output only the requested list." })).filter((n) => !have.has(n) && fresh(n));
+      const listed = await run(namesPrompt(a), { system: "Output only the requested list." });
+      const names = parseNames(listed).filter((n) => !have.has(n) && fresh(n));
       if (!names.length) return known;
+      const english = parseEnglish(listed);
+      const fan = fanWikisFor(`${a.title}\n${a.markdown}`);
       const getJson = async (url) => JSON.parse((await requestUrl({ url, headers: { "User-Agent": "link-scrap (Obsidian plugin)" } })).text);
       const getText = async (url) => htmlText((await requestUrl({ url, headers: { "User-Agent": USER_AGENT } })).text);
       const search = (prompt) => run(prompt, { tools: "WebSearch", system: "Write the entire output in Korean." });
       const compare = (prompt) => run(prompt, { system: "Write the entire output in Korean." });
-      const found = await findKorean(names, { getJson, search, compare, getText, title: a.title });
+      const found = await findKorean(names, { getJson, search, compare, getText, title: a.title, english, fan });
       if (found.missed?.length) {
         for (const n of found.missed) miss[n] = Date.now();
         this.settings.termMiss = miss;

@@ -4,6 +4,7 @@
 //   요약은 원문을 읽고 새로 쓴다. Claude는 기사 전문 번역은 저작권 때문에 대부분 거절하므로 번역 자체는 구글이 한다
 // - 모바일 초안은 노트에 "Claude 확인 대기" 표시를 남기고, PC 옵시디언이 동기화로 받으면 마무리한다 (src/pending.js, main.js)
 import { plainText, tokenize } from "./related.js";
+import { replaceName } from "./lookup.js";
 
 const GT_URL = "https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl=ko&format=text";
 const GT_MAX = 4500; // 요청 하나에 넣을 글 길이
@@ -344,7 +345,8 @@ export function parseTerms(text) {
   const out = [];
   for (const raw of String(text || "").replace(/\r\n/g, "\n").split("\n")) {
     const m = raw.replace(/\s*%%.*?%%\s*$/, "").match(/^\s*[-*]\s+(.+?)\s*(?:→|->|=)\s*(.+?)\s*$/);
-    if (!m || m[1] === m[2] || m[1].length > 60 || m[2].length > 60) continue;
+    // "3DS → 3DS"처럼 같으면 "그대로 둔다"는 뜻 (찾기에서 빼고, Claude에게도 그대로 쓰라고 알린다)
+    if (!m || m[1].length > 60 || m[2].length > 60) continue;
     out.push([m[1], m[2]]);
   }
   // 긴 표기부터 바꿔야 짧은 표기가 긴 표기 일부를 먼저 바꾸지 않는다
@@ -369,7 +371,8 @@ export function applyTerms(s, terms) {
     if (/^[\x20-\x7e]+$/.test(from)) continue;
     s = s.split(from).join(`\u0000${marks.push(to) - 1}\u0000`);
   }
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => marks[i]);
+  // 되돌리면서 바로 뒤 조사를 새 표기의 받침에 맞춘다 (카비를 → 커비를, 봄츄를 → 찍폭탄을)
+  return marks.reduce((acc, to, i) => replaceName(acc, `\u0000${i}\u0000`, to), s);
 }
 
 const termRule = (terms, text) => {

@@ -106,7 +106,44 @@ console.log("6 공식 누리집 비교 OK");
   assert.ok(fixPrompt(body, terms).includes("Bombchu → 봄추"));
   assert.deepEqual(parseFixPairs("봄츄 → 봄추\n- 황금 스컬트라 → 황금 스타르츄라\n없는말 → 봄추\n볼링 → 공굴리기\n봄추 → 봄추", body, terms), [["황금 스컬트라", "황금 스타르츄라"], ["봄츄", "봄추"]]);
 }
-console.log("7 노트 표기 맞추기 OK");
+{
+  const { replaceName } = await import("../src/lookup.js");
+  assert.equal(replaceName("봄츄를 준다. 봄츄가, 봄츄는, 봄츄로, 봄츄와, 봄츄 볼링, 봄츄이다", "봄츄", "찍폭탄"), "찍폭탄을 준다. 찍폭탄이, 찍폭탄은, 찍폭탄으로, 찍폭탄과, 찍폭탄 볼링, 찍폭탄이다");
+  assert.equal(replaceName("찍폭탄을, 찍폭탄으로", "찍폭탄", "봄추"), "봄추를, 봄추로");
+  assert.equal(replaceName("마을로 간다, 마을은", "마을", "론론 목장"), "론론 목장으로 간다, 론론 목장은");
+  assert.equal(replaceName("3DS판", "3DS", "닌텐도 3DS"), "닌텐도 3DS판");
+}
+console.log("7 노트 표기 맞추기·조사 OK");
+
+// 8) 짧은 이름은 시리즈 이름을 뗀다 / 팬 위키는 한 곳만 / 나무위키 단계 / 근거 뒤 덧붙인 말
+{
+  const { seriesOf, stripSeries, fanWikisFor, parseSearch: ps } = await import("../src/lookup.js");
+  assert.equal(seriesOf("The Legend of Zelda: The Wind Waker", "Wind Waker"), "The Legend of Zelda");
+  assert.equal(seriesOf("The Legend of Zelda: Ocarina of Time", "The Legend of Zelda: Ocarina of Time"), "");
+  assert.equal(seriesOf("ゼルダの伝説 時のオカリナ", "時のオカリナ"), "ゼルダの伝説");
+  assert.equal(stripSeries("젤다의 전설 바람의 지휘봉", "젤다의 전설"), "바람의 지휘봉");
+  assert.equal(stripSeries("젤다의 전설", "젤다의 전설"), "젤다의 전설");
+  assert.deepEqual(fanWikisFor("Zelda Ocarina, Hyrule, Mario portrait").map((w) => w.name), ["Zelda Wiki"]);
+  assert.equal(ps("Talon → 타론 | https://namu.wiki/w/x (등장인물 문서)", ["Talon"]).get("Talon").to, "타론");
+  const wikiJson = {
+    query: {
+      redirects: [{ from: "Wind Waker", to: "The Legend of Zelda: The Wind Waker" }],
+      pages: [
+        { title: "The Legend of Zelda: The Wind Waker", langlinks: [{ lang: "ko", title: "젤다의 전설 바람의 지휘봉" }] },
+        { title: "The Legend of Zelda", langlinks: [{ lang: "ko", title: "젤다의 전설" }] },
+      ],
+    },
+  };
+  const prompts = [];
+  const found = await findKorean(["Wind Waker", "Talon"], {
+    title: "Zelda",
+    getJson: async () => wikiJson,
+    search: async (p) => (prompts.push(p), prompts.length === 1 ? "Wind Waker → 바람의 지휘봉 | 위키백과\nTalon → 없음" : "Talon → 타론 | https://namu.wiki/w/x"),
+  });
+  assert.ok(prompts[0].includes("Wind Waker → 바람의 지휘봉") && prompts[1].includes("나무위키") && !prompts[1].includes("Wind Waker"));
+  assert.deepEqual([...found].map((f) => `${f.from}=${f.to}:${f.source.split(" ")[0]}`), ["Wind Waker=바람의 지휘봉:위키백과", "Talon=타론:나무위키"]);
+}
+console.log("8 짧은 이름·팬 위키 하나·나무위키 OK");
 
 if (process.argv.includes("--real")) {
   const { wikiUrl } = await import("../src/lookup.js");
