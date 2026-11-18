@@ -17,7 +17,8 @@ import {
 import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
-import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms } from "./transform.js";
+import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms, claudeGlossary } from "./transform.js";
+import { findKorean, addAuto } from "./lookup.js";
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine, reviewLine, REVIEW_KEY } from "./pending.js";
 import { LOG_NAME, stamp, doneText, jobName, formatEntry, buildLog } from "./log.js";
@@ -554,7 +555,8 @@ export default class LinkScrapPlugin extends Plugin {
         say("구글 번역 중…");
         draft = await translateMarkdown(a, io.post);
       }
-      r = await finishDraft(a, draft, note.jobs, run, { progress, terms: await this.terms() });
+      const terms = note.jobs.translate ? await this.termsFor(a, run, say) : await this.terms();
+      r = await finishDraft(a, draft, note.jobs, run, { progress, terms });
       ({ title, markdown: body } = r);
     }
     if (note.jobs.alias && !isKorean(title)) {
@@ -679,6 +681,38 @@ export default class LinkScrapPlugin extends Plugin {
       return parseTerms(await this.app.vault.cachedRead(f));
     } catch (e) {
       return [];
+    }
+  }
+
+  // 한자·가나 글을 번역할 때: 글의 고유명사를 뽑아 한국 정식 명칭을 찾고(위키백과 → 웹 검색) 용어집에 더한 뒤 용어집 전체를 돌려준다
+  async termsFor(a, run, say = () => {}) {
+    const known = await this.terms();
+    const kana = (`${a.title}\n${a.markdown}`.match(/[぀-ヿ㐀-鿿]/g) || []).length;
+    if (!run || kana < 30) return known;
+    try {
+      say("한국 정식 명칭을 찾는 중…");
+      const have = new Set(known.map(([f]) => f));
+      const listed = await claudeGlossary({ a, src: a.markdown.split("\n").filter((l) => l.trim()) }, run);
+      const names = listed
+        .split("\n")
+        .map((l) => l.split("→")[0].trim())
+        .filter((n) => n && !have.has(n));
+      if (!names.length) return known;
+      const getJson = async (url) => JSON.parse((await requestUrl({ url, headers: { "User-Agent": "link-scrap (Obsidian plugin)" } })).text);
+      const search = (prompt) => run(prompt, { tools: "WebSearch", system: "Write the entire output in Korean." });
+      const found = await findKorean(names, { getJson, search, title: a.title });
+      if (!found.length) return known;
+      let file = this.app.vault.getAbstractFileByPath(this.termsPath());
+      if (!(file instanceof TFile)) {
+        await this.ensureFolder(this.settings.rootFolder || "스크랩");
+        file = await this.app.vault.create(this.termsPath(), TERMS_TEMPLATE);
+      }
+      let text = "";
+      await this.app.vault.process(file, (cur) => (text = addAuto(cur, found)));
+      return parseTerms(text);
+    } catch (e) {
+      console.error("[link-scrap] 한국 정식 명칭 찾기 실패", e);
+      return known;
     }
   }
 
@@ -817,7 +851,8 @@ export default class LinkScrapPlugin extends Plugin {
       if (r.kind === "pdf" && (mode.translate || mode.summary)) remarks.push("PDF는 원문 그대로 저장했습니다");
       if (r.kind === "article" && (mode.translate || mode.summary)) {
         try {
-          const t = await transformArticle(r, mode, { post: io.post, runClaude, terms: await this.terms(), progress: (m) => notice.setMessage(m) });
+          const terms = mode.translate ? await this.termsFor(r, runClaude, (m) => notice.setMessage(m)) : await this.terms();
+          const t = await transformArticle(r, mode, { post: io.post, runClaude, terms, progress: (m) => notice.setMessage(m) });
           if (t) {
             ({ title, markdown } = t);
             translated = t.translated && !t.raw; // raw: 구글 번역이 막혀 원문 그대로

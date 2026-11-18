@@ -456,3 +456,28 @@ console.log("17 사용자 승인 OK:", mock.notices.at(-1));
   assert.deepEqual((await plugin.terms()).map((t) => t.join("→")), ["カービィ→커비", "카비→커비"]);
 }
 console.log("18 번역 용어집 OK");
+
+// 19) PC 번역 전에 한국 정식 명칭 찾기: Claude가 뽑은 이름 → 위키백과(실제) → Claude 맥락 확인·검색 → 용어집 자동 칸
+{
+  const asked = [];
+  const run = async (prompt, opts = {}) => {
+    asked.push({ prompt, tools: opts.tools || "" });
+    if (/고유명사 가운데 한자·가나로 쓴 것/.test(prompt)) return "カービィ → 카비\nパドック → 패독\nシティトライアル → 시티 트라이얼";
+    return "カービィ → 커비 | 위키백과\nパドック → 없음\nシティトライアル → 시티 트라이얼 | https://www.nintendo.com/kr/games/switch2/aaaba/products/soft.html";
+  };
+  const a = { title: "『カービィのエアライダー』の最適化", markdown: "カービィがパドックに集まる。シティトライアルでは描画負荷が高まります。".repeat(3) };
+  const before = await plugin.terms();
+  const terms = await plugin.termsFor(a, run);
+  const note = vault.getAbstractFileByPath("스크랩/번역 용어집.md").data;
+  assert.ok(note.includes("## 자동으로 찾은 표기") && note.includes("- シティトライアル → 시티 트라이얼 %% 웹 검색 https://www.nintendo.com/kr/"), note);
+  assert.ok(!note.includes("예시장") && !/パドック/.test(note), "맥락이 다른 위키백과 표기는 넣지 않음");
+  assert.equal(note.match(/カービィ →/g).length, 1, "이미 있는 원어는 다시 넣지 않음");
+  assert.ok(terms.length === before.length + 1 && terms.some(([f, t]) => f === "シティトライアル" && t === "시티 트라이얼"));
+  assert.equal(asked.find((x) => x.tools).tools, "WebSearch");
+  assert.ok(asked.find((x) => x.tools).prompt.includes("글 제목: 『カービィのエアライダー』の最適化"));
+  // 한국어·영어 글이면 찾지 않는다
+  asked.length = 0;
+  await plugin.termsFor({ title: "Weird", markdown: "plain English text" }, run);
+  assert.equal(asked.length, 0);
+}
+console.log("19 한국 정식 명칭 찾기 OK");

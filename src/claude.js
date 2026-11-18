@@ -36,10 +36,12 @@ export function claudeRunner(req, { cliPath = "", model = "sonnet", timeoutMs = 
   const shell = /\.(cmd|bat)$/i.test(cmd);
   const quote = (a) => (shell ? `"${a.replace(/"/g, '""')}"` : a);
 
-  return (prompt, { system = "" } = {}) =>
+  // tools: 쓸 도구 (기본 없음). 한국 정식 명칭 찾기에만 "WebSearch"를 준다
+  return (prompt, { system = "", tools = "" } = {}) =>
     new Promise((resolve, reject) => {
       const sys = system ? `${SYSTEM} ${system}` : SYSTEM;
-      const args = ["-p", "--safe-mode", "--tools", "", "--no-session-persistence", "--model", model, "--effort", "low", "--output-format", "json", "--system-prompt", sys];
+      const allow = tools ? ["--allowedTools", tools] : [];
+      const args = ["-p", "--safe-mode", "--tools", tools, ...allow, "--no-session-persistence", "--model", model, "--effort", "low", "--output-format", "json", "--system-prompt", sys];
       const child = spawn(quote(cmd), args.map(quote), { cwd: os.tmpdir(), windowsHide: true, shell });
       let out = "";
       let err = "";

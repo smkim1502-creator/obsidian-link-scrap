@@ -343,7 +343,7 @@ async function localSummary({ title, markdown }, translate, post) {
 export function parseTerms(text) {
   const out = [];
   for (const raw of String(text || "").replace(/\r\n/g, "\n").split("\n")) {
-    const m = raw.match(/^\s*[-*]\s+(.+?)\s*(?:→|->|=)\s*(.+?)\s*$/);
+    const m = raw.replace(/\s*%%.*?%%\s*$/, "").match(/^\s*[-*]\s+(.+?)\s*(?:→|->|=)\s*(.+?)\s*$/);
     if (!m || m[1] === m[2] || m[1].length > 60 || m[2].length > 60) continue;
     out.push([m[1], m[2]]);
   }

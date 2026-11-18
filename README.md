@@ -105,6 +105,17 @@ tags:
 - 왼쪽이 잘못 나온 한국어(`카비 → 커비`)면 한국어로 옮긴 결과(구글 초안·Claude 결과·별칭)에서 바로 바꾼다. 원문 그대로 저장한 노트는 바꾸지 않는다
 - 낱말 일부도 바꾸므로 왼쪽은 다른 낱말에 섞이지 않을 표기로 적는다
 
+### 한국 정식 명칭 찾기 (1.9.0~, PC)
+
+한자·가나 글을 번역하거나 번역+요약할 때, PC에서 Claude가 마무리하기 전에 고유명사의 한국 정식 명칭을 찾는다 (`src/lookup.js`). 20~30초 더 걸린다.
+
+1. Claude가 글에서 한자·가나 고유명사를 뽑는다 (용어집에 이미 있는 것은 뺀다)
+2. 일본어 위키백과 문서의 한국어판 제목을 찾는다 (`カービィ` → `커비`, 구분 괄호는 뗀다)
+3. Claude Code가 웹 검색(`--tools WebSearch`)으로 위키백과 표기가 이 글의 대상과 맞는지 확인하고(`パドック` → `예시장` 같은 동음이의는 버림), 위키백과에 없는 이름은 한국 공식 표기(한국닌텐도 등)를 근거 주소와 함께 찾는다. 근거가 없으면 넣지 않는다
+4. 찾은 표기를 용어집의 `## 자동으로 찾은 표기` 칸에 `- 원어 → 표기 %% 출처 %%`로 남기고, 이번 번역부터 쓴다. 틀린 줄은 고치거나 지우면 된다. 위쪽에 직접 적은 줄이 먼저다
+
+확인 단계가 실패하면 아무것도 더하지 않는다(틀린 표기를 남기지 않기 위해). 휴대폰은 Claude가 없어 찾지 않고, PC가 마무리할 때 찾는다.
+
 ### 내 최종 승인 (1.7.0~)
 
 Claude를 거친 번역·요약 노트(마무리했든 못 했든)에는 속성 `승인: false`(체크박스)가 붙는다. 읽어 보고 괜찮으면 노트 위쪽 속성의 체크박스를 켜거나 명령 `이 스크랩 승인`을 실행한다. 별칭만 고친 노트는 대상이 아니다.
@@ -176,6 +187,7 @@ node test/syncnotice.mjs    # Remotely Save 자동 동기화 알림 (가짜 Remo
 node test/selfupdate.mjs    # PC에서 새 버전 파일을 스스로 다시 불러오기
 node test/google_down.mjs   # 구글 번역이 막혔을 때 다시 보내기·원문 저장+확인 대기
 node test/terms.mjs         # 번역 용어집 읽기·지시문·결과 바꾸기
+node test/lookup.mjs [--real]  # 한국 정식 명칭 찾기 (위키백과 응답 읽기·맥락 확인·용어집 자동 칸)
 node test/eval_related.mjs  # 자동 태그·관련 노트 적중률 (실제 Vault 읽기만)
 DEBUG=1 node test/real_vault.mjs "스크랩/경제" url …  # 실제 Vault 기준으로 새 글 스크랩 결과·후보 점수 보기 (메모리에서만 저장)
 node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사 (켜져 있는 PC 옵시디언이 스스로 다시 불러옴)
@@ -191,7 +203,8 @@ node build.mjs --install    # 빌드 후 Vault 플러그인 폴더에 복사 (�
 | `src/log.js` | `Claude 확인 기록` 노트: 확인 대기 목록, 노트마다 결과·고친 줄 전후 |
 | `src/syncnotice.js` | Remotely Save 자동 동기화의 시작·끝·실패 알림 (플러그인 객체의 상태 갱신 호출을 감싸서 읽음) |
 | `src/selfupdate.js` | PC: 플러그인 폴더의 파일이 바뀌면 플러그인을 스스로 껐다 켜기 |
-| `src/claude.js` | PC의 Claude Code를 구독 계정으로 실행 (`-p --safe-mode --tools ""`) |
+| `src/claude.js` | PC의 Claude Code를 구독 계정으로 실행 (`-p --safe-mode --tools ""`, 정식 명칭 찾기만 `--tools WebSearch`) |
+| `src/lookup.js` | 고유명사의 한국 정식 명칭 찾기: 위키백과 한국어판 제목 → Claude 맥락 확인·웹 검색 → 용어집 자동 칸 |
 | `src/main.js` | 옵시디언 플러그인: 입력창, 저장(이미지 빼기), 중복 감지, 자동 태그·링크, 설정, `obsidian://scrap` |
 | `build.mjs` | esbuild 번들 → `dist/`, `--install` 시 Vault에 복사 |
 | `test/` | 추출 검증·플러그인 흐름 검사 |
