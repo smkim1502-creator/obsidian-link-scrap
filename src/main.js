@@ -754,10 +754,10 @@ export default class LinkScrapPlugin extends Plugin {
       const english = parseEnglish(listed);
       const fan = fanWikisFor(`${a.title}\n${a.markdown}`);
       const getJson = async (url) => JSON.parse((await requestUrl({ url, headers: { "User-Agent": "link-scrap (Obsidian plugin)" } })).text);
-      const getText = async (url) => htmlText((await requestUrl({ url, headers: { "User-Agent": USER_AGENT } })).text);
+      const getHtml = async (url) => (await requestUrl({ url, headers: { "User-Agent": USER_AGENT } })).text;
       const search = (prompt) => run(prompt, { tools: "WebSearch", system: "Write the entire output in Korean." });
       const compare = (prompt) => run(prompt, { system: "Write the entire output in Korean." });
-      const found = await findKorean(names, { getJson, search, compare, getText, title: a.title, english, fan });
+      const found = await findKorean(names, { getJson, search, compare, getHtml, title: a.title, text: a.markdown, english, fan });
       if (found.missed?.length) {
         for (const n of found.missed) miss[n] = Date.now();
         this.settings.termMiss = miss;

@@ -195,7 +195,164 @@ ${rest.join("\n")}
 
 ${a}${b}한 줄에 하나씩 "원어 → 표기 | 근거" 형식으로만 쓰고 설명은 덧붙이지 않는다.
 글이 다루는 게임의 공식 누리집을 찾았으면 맨 끝에 "공식 누리집: 원어판 주소 | 한국판 주소" 한 줄을 쓴다(원어판은 nintendo.com/jp·nintendo.co.jp·nintendo.com/us 등, 한국판은 nintendo.com/kr 등, 게임 소개 첫 페이지). 게임이 여럿이면 줄을 여럿 쓴다.
+글이 다루는 게임의 나무위키 문서를 찾았으면 "나무위키 문서: 주소" 한 줄을 쓴다(게임 자체의 문서. 예: https://namu.wiki/w/젤다의 전설 시간의 오카리나).
 `;
+}
+
+// ---------- 참고 자료: 그 게임의 나무위키 문서(하위 문서 포함)와 한국판 공식 누리집 글 ----------
+// 찾은 표기는 이 자료나 근거 페이지에 실제로 있어야 받는다 (검색이 설명 문장을 이름으로 착각: 무거운 철 신발 ≠ 헤비 부츠)
+
+/** "나무위키 문서: 주소" 줄 */
+export function parseNamuPages(out) {
+  return [...String(out || "").matchAll(/나무위키 문서\s*[:：]\s*(https?:\/\/namu\.wiki\/w\/[^\n|]+?)\s*$/gm)].map((m) => m[1].trim().replace(/ /g, "%20")).slice(0, 2);
+}
+
+/** 나무위키 문서에서 하위 문서(문서 이름/…) 주소들 */
+export function namuSubpages(html) {
+  const main = (String(html).match(/<title>([^<]+?)(?: - 나무위키)?<\/title>/) || [])[1];
+  if (!main) return [];
+  const esc = main.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const subs = [...String(html).matchAll(new RegExp(`title='(${esc}/[^']+)'`, "g"))].map((m) => m[1]);
+  return [...new Set(subs)].map((t) => `https://namu.wiki/w/${encodeURIComponent(t).replace(/%2F/g, "/")}`);
+}
+
+/** 한국판 공식 누리집에서 같은 게임의 다른 페이지 주소들 (같은 폴더 아래, 인터뷰 포함) */
+export function koLinks(html, url) {
+  let base;
+  try {
+    base = new URL(url);
+  } catch (e) {
+    return [];
+  }
+  const dir = base.pathname.replace(/[^/]*$/, "");
+  const id = (dir.match(/\/([a-z0-9]{4,6})\/$/) || [])[1];
+  const out = new Set();
+  for (const m of String(html).matchAll(/href="([^"#]+)"/g)) {
+    let u;
+    try {
+      u = new URL(m[1], base);
+    } catch (e) {
+      continue;
+    }
+    if (u.host !== base.host || !/\.html?$/.test(u.pathname) || u.href === base.href) continue;
+    if (u.pathname.startsWith(dir) || (id && u.pathname.includes(`/interview/${id}/`))) out.add(u.href);
+  }
+  return [...out];
+}
+
+const CORPUS_PAGES = 14;
+
+/** 참고 자료를 모은다. getHtml: 주소 → HTML */
+export async function buildCorpus({ namu = [], ko = [], getHtml }) {
+  const texts = [];
+  const seen = new Set();
+  const take = async (u) => {
+    if (seen.has(u) || seen.size >= CORPUS_PAGES) return "";
+    seen.add(u);
+    try {
+      const h = await getHtml(u);
+      texts.push(htmlText(h));
+      return h;
+    } catch (e) {
+      return "";
+    }
+  };
+  for (const u of namu) {
+    const h = await take(u);
+    await Promise.all(namuSubpages(h).slice(0, 8).map(take));
+  }
+  for (const u of ko) {
+    const h = await take(u);
+    await Promise.all(koLinks(h, u).slice(0, 6).map(take));
+  }
+  return texts.join("\n");
+}
+
+/** 이름마다 한국어 후보 여러 개 (자료에서 찾아볼 낱말) */
+export function guessPrompt(title, names) {
+  return `글 제목: ${title}
+
+아래 이름이 이 게임의 한국어판에서 어떻게 쓰일지 후보를 낸다. 공식 한국어판 표기로 있을 만한 것, 원어 발음대로 쓴 것, 뜻을 옮긴 것을 섞어 이름마다 4~6개.
+- 한 줄에 "원어 → 후보1 / 후보2 / 후보3 …"
+- 설명은 쓰지 않는다
+${names.join("\n")}
+`;
+}
+
+export function parseGuesses(out, names) {
+  const want = new Map(names.map((n) => [String(n).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim(), n]));
+  const m = new Map();
+  for (const raw of String(out || "").split("\n")) {
+    const x = raw.replace(/^\s*[-*]\s*/, "").match(/^(.+?)\s*→\s*(.+)$/);
+    const name = x && want.get(x[1].normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim());
+    if (!name) continue;
+    m.set(name, [...new Set(x[2].split(/\s*[/／,]\s*/).map((c) => c.trim()).filter((c) => c && /[가-힯]/.test(c) && c.length <= 30))]);
+  }
+  return m;
+}
+
+/** 후보가 자료에 몇 번, 어떤 문장에 나오는지. 띄어쓰기만 다른 후보는 더 많이 나오는 쪽만 남긴다 (데드핸드 15번 > 데드 핸드 3번) */
+export function corpusHits(corpus, cands) {
+  const hits = cands
+    .map((c) => {
+      const n = corpus.split(c).length - 1;
+      const ctx = [];
+      for (let i = corpus.indexOf(c); i >= 0 && ctx.length < 2; i = corpus.indexOf(c, i + c.length)) ctx.push(corpus.slice(Math.max(0, i - 50), i + c.length + 50).replace(/\s+/g, " "));
+      return { cand: c, n, ctx: ctx.join(" … ") };
+    })
+    .filter((h) => h.n);
+  const best = new Map();
+  for (const h of hits) {
+    const k = h.cand.replace(/\s+/g, "");
+    if (!best.has(k) || best.get(k).n < h.n) best.set(k, h);
+  }
+  const list = [...best.values()];
+  return list.filter(
+    (h) =>
+      // 1번만 나오는 후보는 설명 속 낱말이기 쉬워 고르지 않는다 (다음 단계 나무위키 검색에 맡긴다)
+      h.n >= 2 &&
+      // 더 긴 후보 안에 들어 있고 대부분 그 긴 후보로 나오면 버린다 (단페 ⊂ 단페이)
+      !list.some((o) => o !== h && o.cand.includes(h.cand) && o.n * 2 >= h.n)
+  );
+}
+
+/** 원문에서 그 이름이 나오는 문장 (고를 때 맥락으로 보여 준다) */
+export function sourceContext(text, name, max = 2) {
+  const out = [];
+  const t = String(text || "");
+  const lower = t.toLowerCase();
+  const key = name.toLowerCase();
+  for (let i = lower.indexOf(key); i >= 0 && out.length < max; i = lower.indexOf(key, i + key.length)) out.push(t.slice(Math.max(0, i - 120), i + name.length + 120).replace(/\s+/g, " "));
+  return out;
+}
+
+export function choosePrompt(title, items) {
+  return `글 제목: ${title}
+
+이름마다 원문에서 그 이름이 나오는 문장과, 한국어 후보가 이 게임의 나무위키 문서·한국판 공식 누리집에 나오는 횟수와 문장이다. 이 글의 그 이름에 해당하는 한국어판 표기를 하나 고른다.
+- 한 줄에 "원어 → 고른 후보"
+- 후보 가운데에서만 고른다. 설명 문장 속 낱말(예: "무거운 철 신발을 신고")이 아니라 이름으로 쓰인 것을 고른다
+- 원문이 다루는 판(예: 2026 리메이크)에서 쓰는 이름을 고른다. 옛 판의 이름과 새 판의 이름이 다르면 새 판 쪽이다
+- 맞는 후보가 없으면 "원어 → 없음"
+
+${items.map(([name, hits, src = []]) => `[${name}]\n${src.map((s) => `원문: … ${s} …`).join("\n")}${src.length ? "\n" : ""}${hits.map((h) => `${h.cand} (${h.n}번): … ${h.ctx} …`).join("\n")}`).join("\n\n")}
+`;
+}
+
+// 이름 비교는 악센트·대소문자를 무시한다 (Dampé = Dampe)
+const nkey = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+
+export function parseChoose(out, items) {
+  const by = new Map(items.map(([n, hits]) => [nkey(n), [n, new Set(hits.map((h) => h.cand))]]));
+  const found = new Map();
+  for (const raw of String(out || "").split("\n")) {
+    const x = raw.replace(/^\s*[-*]\s*/, "").match(/^(.+?)\s*→\s*(.+?)\s*$/);
+    const it = x && by.get(nkey(x[1]));
+    if (!it) continue;
+    const to = x[2].trim();
+    if (it[1].has(to)) found.set(it[0], to);
+  }
+  return found;
 }
 
 /** 나무위키 검색 지시문 (앞 단계에서 못 찾은 이름만) */
@@ -310,9 +467,10 @@ export function addAuto(text, entries) {
  * @param {{getJson:(url:string)=>Promise<any>, search?:(prompt:string)=>Promise<string>, title?:string}} deps
  * @returns {Promise<{from:string, to:string, source:string}[]>}
  */
-export async function findKorean(names, { getJson, search, compare, getText, title = "", english = new Map(), fan = [] }) {
+export async function findKorean(names, { getJson, search, compare, getHtml, getText = getHtml && (async (u) => htmlText(await getHtml(u))), title = "", text = "", english = new Map(), fan = [] }) {
   const all = [...new Set(names)].filter(Boolean);
   const wiki = new Map();
+  const wikiFull = new Set(); // 시리즈 이름을 떼기 전 한국어 문서 제목 (나무위키 문서 이름으로 쓴다)
   for (const lang of ["ja", "en"]) {
     const mine = all.filter((n) => wikiLang(n) === lang);
     const series = new Map(); // 이름 → 시리즈 이름 (짧은 이름으로 쓴 경우)
@@ -320,7 +478,10 @@ export async function findKorean(names, { getJson, search, compare, getText, tit
       const part = mine.slice(i, i + 50);
       try {
         const json = await getJson(wikiUrl(part, lang));
-        for (const [from, to] of wikiKorean(json, part)) wiki.set(from, to);
+        for (const [from, to] of wikiKorean(json, part)) {
+          wiki.set(from, to);
+          wikiFull.add([to, from]);
+        }
         for (const [from, t] of wikiTargets(json, part)) {
           const s = seriesOf(t, from);
           if (s && wiki.has(from)) series.set(from, s);
@@ -353,10 +514,36 @@ export async function findKorean(names, { getJson, search, compare, getText, tit
   const found = [];
   // 검색이 답한 이름 가운데 못 찾은 것 (다음 글에서 같은 이름을 곧바로 다시 검색하지 않도록 플러그인이 기억한다)
   found.missed = [];
+  // 참고 자료: 그 게임의 나무위키 문서(하위 문서 포함)와 한국판 공식 누리집
+  // 나무위키 문서: 검색이 알려 준 주소 + 위키백과에서 찾은 긴 제목(대개 게임 이름)으로 만든 주소
+  // 글 제목에 나오는 이름의 문서를 먼저, 그다음 긴 제목 순 (다른 게임 문서가 섞이지 않게 둘까지)
+  const inTitle = (from) => title.toLowerCase().includes(from.toLowerCase());
+  const namuGuess = [...new Map([...wikiFull].map(([t, from]) => [t, from]))]
+    .filter(([t]) => t.length >= 6)
+    .sort((x, y) => inTitle(y[1]) - inTitle(x[1]) || y[0].length - x[0].length)
+    .slice(0, 1)
+    .map(([t]) => `https://namu.wiki/w/${encodeURIComponent(t)}`);
+  const namuPages = [...new Set([...namuGuess, ...parseNamuPages(out)])].slice(0, 1);
+  const corpus = getHtml ? await buildCorpus({ namu: namuPages, ko: parseSites(out).map((s) => s.ko), getHtml }) : "";
+  // 검색 결과는 참고 자료나 근거 페이지에 그 표기가 실제로 있어야 받는다
+  const pageHas = async (url, to) => {
+    if (corpus.includes(to)) return true;
+    if (!getText || !/^https?:/.test(url)) return false;
+    try {
+      return (await getText(url)).includes(to);
+    } catch (e) {
+      return false;
+    }
+  };
+  // 참고 자료가 있으면 검색 결과는 바로 받지 않고 후보로 넘겨, 자료의 문장을 보고 고르게 한다
+  const searchCands = new Map();
   for (const [from, v] of parseSearch(out, [...wiki.keys(), ...rest])) {
     if (v.url === "위키백과") {
-      if (wiki.get(from) === v.to) found.push({ from, to: v.to, source: "위키백과" });
-    } else found.push({ from, to: v.to, source: `웹 검색 ${v.url}` });
+      // Claude가 시리즈 이름을 붙이거나 떼어 답해도 같은 대상이면 위키백과 쪽(짧은 이름 처리를 한 표기)을 쓴다
+      const w = wiki.get(from);
+      if (w && (w === v.to || w.includes(v.to) || v.to.includes(w))) found.push({ from, to: w, source: "위키백과" });
+    } else if (corpus && compare) searchCands.set(from, v);
+    else if (await pageHas(v.url, v.to)) found.push({ from, to: v.to, source: `웹 검색 ${v.url}` });
   }
   // 아직 못 찾은 이름은 원어판·한국판 공식 누리집을 직접 받아 같은 부분을 맞대 본다
   // (검색 도구는 페이지를 요약해 읽어 게임 속 용어를 놓친다: パドック → 대기소)
@@ -377,7 +564,25 @@ export async function findKorean(names, { getJson, search, compare, getText, tit
       }
     }
   }
+  // 참고 자료에서 고르기: Claude가 이름마다 한국어 후보를 여러 개 내고, 자료에 실제로 나오는 후보만 문장과 함께 보여 주고 고르게 한다
+  if (compare && corpus) {
+    const left = all.filter((n) => !found.some((f) => f.from === n)).slice(0, SEARCH_MAX);
+    if (left.length) {
+      try {
+        const guesses = parseGuesses(await compare(guessPrompt(title, left)), left);
+        for (const [n, v] of searchCands) guesses.set(n, [...new Set([...(guesses.get(n) || []), v.to])]);
+        const items = [...guesses].map(([n, cands]) => [n, corpusHits(corpus, cands), sourceContext(text, n)]).filter(([, h]) => h.length);
+        if (items.length) {
+          for (const [from, to] of parseChoose(await compare(choosePrompt(title, items)), items)) found.push({ from, to, source: "참고 자료(나무위키·공식 누리집)" });
+        }
+      } catch (e) {
+        // 고르기가 실패하면 근거 페이지에 있는 검색 결과만 받는다
+        for (const [from, v] of searchCands) if (!found.some((f) => f.from === from) && (await pageHas(v.url, v.to))) found.push({ from, to: v.to, source: `웹 검색 ${v.url}` });
+      }
+    }
+  }
   // 그래도 못 찾은 이름은 게임 팬 위키 문서의 다른 언어 이름 표에서 한국어판 이름을 찾는다
+  // (참고 자료가 있으면 거기에도 나오는 표기만: 옛 판의 이름이나 낯선 표기를 거른다)
   if (compare && fan.length) {
     const left = all.filter((n) => !found.some((f) => f.from === n)).slice(0, FAN_MAX);
     const items = [];
@@ -399,6 +604,7 @@ export async function findKorean(names, { getJson, search, compare, getText, tit
     if (items.length) {
       try {
         for (const [from, to] of parseFan(await compare(fanPrompt(items)), items)) {
+          if (corpus && !corpus.includes(to)) continue;
           const it = items.find((x) => x[0] === from);
           found.push({ from, to, source: `팬 위키 ${it[3].name} ${it[3].api.replace(/\/(w\/)?api\.php$/, "")}/wiki/${encodeURIComponent((english.get(from) || from).replace(/ /g, "_"))}` });
         }
@@ -412,7 +618,7 @@ export async function findKorean(names, { getJson, search, compare, getText, tit
   if (left.length) {
     try {
       for (const [from, v] of parseSearch(await search(namuPrompt(title, left)), left)) {
-        if (v.url !== "위키백과") found.push({ from, to: v.to, source: `${/namu\.wiki/.test(v.url) ? "나무위키" : "웹 검색"} ${v.url}` });
+        if (v.url !== "위키백과" && (await pageHas(v.url, v.to))) found.push({ from, to: v.to, source: `${/namu\.wiki/.test(v.url) ? "나무위키" : "웹 검색"} ${v.url}` });
       }
     } catch (e) {
       // 실패하면 건너뛴다

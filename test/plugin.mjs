@@ -495,7 +495,11 @@ console.log("19 한국 정식 명칭 찾기 OK");
   const realFetch = plugin.fetchArticle;
   plugin.fetchArticle = async () => ({ kind: "article", title: "Ocarina remake: Bombchu bowling", markdown: "The Bombchu Bowling owner. Collect 100 Gold Skulltula tokens." });
   const f = await vault.create("스크랩/게임/봄츄 볼링 이야기.md", `---\nurl: https://example.com/zelda\nClaude: "번역·요약 완료 · 2026-11-18 23:59"\n승인: true\n---\n# 봄츄 볼링 이야기\n\n- 봄츄 볼링 주인의 근황.\n- 황금 스컬트라 100마리를 모은다. 봄츄를 준다.\n`);
+  // 근거 페이지에 그 표기가 실제로 있어야 받으므로, 근거 주소의 내용을 흉내 낸다
+  const netFetch = globalThis.fetch;
+  globalThis.fetch = (url, o) => (/nintendo\.com\/kr\/[xy]$/.test(String(url)) ? Promise.resolve(new Response("<p>봄추 · 황금 스타르츄라</p>", { status: 200 })) : netFetch(url, o));
   const pairs = await plugin.recheckTerms(f);
+  globalThis.fetch = netFetch;
   plugin.fetchArticle = realFetch;
   assert.deepEqual(pairs, [["황금 스컬트라", "황금 스타르츄라", 1], ["봄츄", "봄추", 3]]);
   assert.equal(f.path, "스크랩/게임/봄추 볼링 이야기.md");

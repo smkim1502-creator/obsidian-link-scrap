@@ -48,6 +48,7 @@ console.log("3 용어집에 더하기 OK");
   const found = await findKorean(["カービィ", "パドック", "ファミコン", "スプラトゥーン3", "ない"], {
     title: "『カービィのエアライダー』最適化",
     getJson: async () => wiki2,
+    getHtml: async (url) => (url.includes("nintendo.com/kr/x") ? "<p>스플래툰 3 소개</p>" : "<p>다른 페이지</p>"),
     search: async (p) => (
       asked.push(p),
       "カービィ → 커비 | 위키백과\nパドック → 없음\nファミコン → 패미컴 | 위키백과\nスプラトゥーン3 → 스플래툰 3 | https://www.nintendo.com/kr/x\nない → 없음"
@@ -138,12 +139,57 @@ console.log("7 노트 표기 맞추기·조사 OK");
   const found = await findKorean(["Wind Waker", "Talon"], {
     title: "Zelda",
     getJson: async () => wikiJson,
+    getHtml: async () => "<p>마론과 타론이 산다</p>",
     search: async (p) => (prompts.push(p), prompts.length === 1 ? "Wind Waker → 바람의 지휘봉 | 위키백과\nTalon → 없음" : "Talon → 타론 | https://namu.wiki/w/x"),
   });
   assert.ok(prompts[0].includes("Wind Waker → 바람의 지휘봉") && prompts[1].includes("나무위키") && !prompts[1].includes("Wind Waker"));
   assert.deepEqual([...found].map((f) => `${f.from}=${f.to}:${f.source.split(" ")[0]}`), ["Wind Waker=바람의 지휘봉:위키백과", "Talon=타론:나무위키"]);
 }
 console.log("8 짧은 이름·팬 위키 하나·나무위키 OK");
+
+// 9) 근거 페이지에 없는 표기는 버린다 / 참고 자료(나무위키·공식 누리집)에서 후보 고르기 / 참고 자료에 없는 팬 위키 표기는 버린다
+{
+  const { namuSubpages, koLinks, parseGuesses, corpusHits, parseChoose, parseNamuPages } = await import("../src/lookup.js");
+  const mainHtml = "<title>젤다의 전설 시간의 오카리나 - 나무위키</title><a title='젤다의 전설 시간의 오카리나/아이템'>x</a><a title='젤다의 전설 시간의 오카리나/몬스터'>y</a><a title='다른 문서/아이템'>z</a>";
+  assert.deepEqual(namuSubpages(mainHtml).map(decodeURIComponent), ["https://namu.wiki/w/젤다의 전설 시간의 오카리나/아이템", "https://namu.wiki/w/젤다의 전설 시간의 오카리나/몬스터"]);
+  assert.deepEqual(koLinks('<a href="dungeon/index.html">a</a><a href="../../../interview/aa9ja/02.html">b</a><a href="/kr/other/x.html">c</a>', "https://www.nintendo.com/kr/games/switch2/aa9ja/index.html"), ["https://www.nintendo.com/kr/games/switch2/aa9ja/dungeon/index.html", "https://www.nintendo.com/kr/interview/aa9ja/02.html"]);
+  assert.deepEqual(parseNamuPages("나무위키 문서: https://namu.wiki/w/젤다의 전설 시간의 오카리나"), ["https://namu.wiki/w/젤다의%20전설%20시간의%20오카리나"]);
+  const g = parseGuesses("Iron Boots → 아이언 부츠 / 헤비 부츠 / 무쇠 장화 / 무거운 철 신발", ["Iron Boots"]);
+  const corpus = "헤비 부츠 ★ 시간의 오카리나 2026 리메이크. 무거운 철 신발을 신고 물에 들어간다. 헤비 부츠를 신어야";
+  const hits = corpusHits(corpus, g.get("Iron Boots"));
+  // 1번만 나오는 후보(설명 문장 속 낱말)는 빼고, 긴 후보에 들어 있는 짧은 후보도 뺀다
+  assert.deepEqual(hits.map((h) => `${h.cand}:${h.n}`), ["헤비 부츠:2"]);
+  assert.deepEqual(corpusHits("단페이가 단페이의 단페이를", ["단페", "단페이"]).map((h) => h.cand), ["단페이"]);
+  assert.deepEqual(corpusHits("데드핸드 데드핸드 데드핸드 데드 핸드", ["데드 핸드", "데드핸드"]).map((h) => h.cand), ["데드핸드"]);
+  assert.deepEqual([...parseChoose("Iron Boots → 헤비 부츠\nIron Boots → 아이언 부츠", [["Iron Boots", hits]])], [["Iron Boots", "헤비 부츠"]]);
+  assert.deepEqual([...parseChoose("Dampe → 단페이", [["Dampé", [{ cand: "단페이", n: 3 }]]])], [["Dampé", "단페이"]]);
+  assert.equal(parseChoose("Iron Boots → 아이언 부츠", [["Iron Boots", hits]]).size, 0);
+
+  // 흐름
+  const pages = {
+    "https://namu.wiki/w/Zelda": "<title>Zelda - 나무위키</title><a title='Zelda/아이템'>i</a>",
+    "https://namu.wiki/w/Zelda/%EC%95%84%EC%9D%B4%ED%85%9C": `<p>${corpus}</p><p>찍폭탄 볼링장</p>`,
+    "https://kr.example/x": "<p>다른 글</p>",
+  };
+  const prompts = [];
+  const found = await findKorean(["Iron Boots", "Heavy", "Master Quest", "Talon"], {
+    title: "Zelda Ocarina remake",
+    getJson: async () => ({ query: { pages: [] } }),
+    getHtml: async (u) => pages[u] ?? "",
+    fan: [{ name: "Zelda Wiki", api: "https://zeldawiki.wiki/w/api.php" }],
+    english: new Map(),
+    search: async (p) => (prompts.push(p), p.includes("나무위키에서 찾는다") ? "Talon → 타론 | https://kr.example/x" : "Heavy → 무거운 철 신발 | https://kr.example/x\n나무위키 문서: https://namu.wiki/w/Zelda"),
+    compare: async (p) => {
+      if (p.includes("후보를 낸다")) return "Iron Boots → 아이언 부츠 / 헤비 부츠 / 무거운 철 신발\nTalon → 탈론 / 타론";
+      // Heavy의 검색 결과(무거운 철 신발)는 후보로만 들어가고, 자료에 1번뿐이라 고를 후보에서도 빠진다
+      if (p.includes("고른다")) return assert.ok(!p.includes("[Heavy]")), "Iron Boots → 헤비 부츠\nHeavy → 무거운 철 신발";
+      return "Master Quest → 시간의 오카리나「another」버젼";
+    },
+  });
+  // Heavy: 근거 페이지에 없어 버림 / Iron Boots: 참고 자료에서 고름 / Master Quest: 참고 자료에 없는 팬 위키 표기라 버림 / Talon: 근거 페이지에 없어 버림
+  assert.deepEqual([...found].map((f) => `${f.from}=${f.to}`), ["Iron Boots=헤비 부츠"]);
+}
+console.log("9 근거 확인·참고 자료에서 고르기 OK");
 
 if (process.argv.includes("--real")) {
   const { wikiUrl } = await import("../src/lookup.js");
