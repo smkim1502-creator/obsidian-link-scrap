@@ -1,6 +1,6 @@
 // URL 하나를 받아 {title, url, markdown, ...}을 만드는 전체 흐름.
 // 네트워크·HTML 파서·마크다운 변환기는 주입받는다 (옵시디언: requestUrl/DOMParser/htmlToMarkdown, 테스트: fetch/jsdom/turndown).
-import { extractArticle, decodeHtml, rewriteFetchUrl, apiOverride, tidyMarkdown, userAgentFor } from "./extract.js";
+import { extractArticle, decodeHtml, rewriteFetchUrl, apiOverride, tidyMarkdown, userAgentFor, findParts } from "./extract.js";
 
 const TRACKING_PARAMS = /^(utm_\w+|fbclid|gclid|igshid|sub_rt|ntype|cds|ref_src|si)$/i;
 export const BLOCKED_TITLE = /^(Just a moment|Attention Required|잠시만 기다리십시오|잠시만 기다려)/i;
@@ -92,6 +92,8 @@ export async function scrapUrl(input, io) {
     doc = io.parseHtml(rendered, pageUrl);
   }
 
+  // 여러 편으로 나뉜 글이면 편 목록 (extractArticle이 문서를 고치기 전에 읽는다)
+  const parts = findParts(doc, pageUrl);
   const a = extractArticle(doc, pageUrl);
   const shortLink = SHORT_HOSTS.test(new URL(original).hostname);
   return {
@@ -100,5 +102,29 @@ export async function scrapUrl(input, io) {
     title: a.title,
     markdown: tidyMarkdown(io.toMarkdown(a.html || ""), a.title),
     fallback: a.fallback,
+    parts,
   };
+}
+
+/**
+ * 여러 편으로 나뉜 글을 한 편으로 합친다. 어느 편 링크로 시작해도 1편 주소를 url로 쓰고, 편마다 "## N. 편 제목" 소제목을 단다
+ * @param {object} first  scrapUrl 결과 (parts가 2개 이상)
+ */
+export async function scrapSeries(first, io) {
+  const parts = first.parts;
+  const got = await Promise.all(
+    parts.map(async (p) => {
+      if (cleanUrl(p.url) === first.url || p.url === first.url) return first;
+      try {
+        return await scrapUrl(p.url, io);
+      } catch (e) {
+        return null;
+      }
+    })
+  );
+  const sections = got.map((r, i) => {
+    const head = `## ${i + 1}. ${parts[i].label || `${i + 1}편`}`;
+    return r && r.kind === "article" ? `${head}\n\n${r.markdown.trim()}` : `${head}\n\n(이 편을 가져오지 못했습니다: ${parts[i].url})`;
+  });
+  return { ...first, url: cleanUrl(parts[0].url), markdown: sections.join("\n\n") + "\n", parts, missing: got.filter((r) => !r).length };
 }

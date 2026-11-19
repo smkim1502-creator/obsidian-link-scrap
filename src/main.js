@@ -14,7 +14,7 @@ import {
   parseFrontMatterTags,
   parseFrontMatterAliases,
 } from "obsidian";
-import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
+import { scrapUrl, scrapSeries, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
 import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms, termLines } from "./transform.js";
@@ -877,7 +877,9 @@ export default class LinkScrapPlugin extends Plugin {
 
   // 글을 가져온다. 스크랩에는 이미지 없이 글만 담는다 (사용자 요청, 1.3.2)
   async fetchArticle(url) {
-    const r = await scrapUrl(url, io);
+    let r = await scrapUrl(url, io);
+    // 여러 편으로 나뉜 글(개발자에게 물어보았습니다 1~4편 등)은 전부 받아 한 노트로 합친다
+    if (r.kind === "article" && r.parts?.length > 1) r = await scrapSeries(r, io);
     if (r.kind === "article") r.markdown = stripImages(r.markdown || "");
     return r;
   }
@@ -900,6 +902,16 @@ export default class LinkScrapPlugin extends Plugin {
     const notice = new Notice("스크랩 중…", 0);
     try {
       const r = await this.fetchArticle(url);
+      // 여러 편을 합친 글은 1편 주소로 저장되므로, 다른 편 링크로 넣었어도 이미 있는지 다시 본다
+      if (r.parts?.length > 1) {
+        const again = this.findExisting(r.url);
+        if (again) {
+          notice.hide();
+          new Notice(`이미 스크랩한 글입니다: ${again.basename}`);
+          if (open) this.app.workspace.getLeaf(false).openFile(again);
+          return again;
+        }
+      }
       let title = r.title;
       let markdown = r.markdown || "";
       // 폴더·태그·관련 노트 비교에 쓸 글. 한국어로 옮겼으면 그쪽이 내 노트와 비교하기 좋다
@@ -913,6 +925,7 @@ export default class LinkScrapPlugin extends Plugin {
       let claudeDone = null;
       let claudeFail = "";
       if (r.kind === "pdf" && (mode.translate || mode.summary)) remarks.push("PDF는 원문 그대로 저장했습니다");
+      if (r.parts?.length > 1) remarks.push(`${r.parts.length}편으로 나뉜 글을 한 노트로 합쳤습니다${r.missing ? ` (${r.missing}편은 가져오지 못함)` : ""}`);
       if (r.kind === "article" && (mode.translate || mode.summary)) {
         try {
           const terms = mode.translate ? await this.termsFor(r, runClaude, (m) => notice.setMessage(m)) : await this.terms();

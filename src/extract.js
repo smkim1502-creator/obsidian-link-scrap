@@ -77,7 +77,73 @@ const SITE_RULES = [
     content: ["#topic_contents", ".topic_contents"],
     remove: ["script"],
   },
+  {
+    // 닌텐도 「개발자에게 물어보았습니다」: 말풍선 머리의 이름(아오누마, 고 …)을 굵게 앞에 붙이고, 묻는 쪽(왼쪽 말풍선)은 "—"로
+    host: /(^|\.)nintendo\.com$|(^|\.)nintendo\.co\.jp$/,
+    content: [".interview-main-sec__body"],
+    remove: ["script", ".interview-index-list", ".interview-bottom-index", ".interview-bottom-pager"],
+    cleanTitle: (t) => t.replace(/\s*[｜|]\s*(닌텐도|任天堂|Nintendo)\s*$/i, ""),
+    prepare: (el) => {
+      const d = el.ownerDocument;
+      el.querySelectorAll('[class*="balloon-right__header-name"], [class*="balloon-left__header-name"]').forEach((n) => {
+        const name = n.textContent.trim();
+        // 이름 요소 자신도 클래스에 balloon-이 들어 있으므로 바깥 말풍선을 이름으로 찾는다
+        const text = n.parentElement?.closest(".interview-balloon-right, .interview-balloon-left")?.querySelector('[class*="__text"]');
+        if (name && text) {
+          const s = d.createElement("strong");
+          s.textContent = `${name}: `;
+          text.prepend(s);
+        }
+        n.remove();
+      });
+      el.querySelectorAll('[class*="balloon-left__text"]').forEach((t) => {
+        if (t.querySelector("strong")) return;
+        const s = d.createElement("strong");
+        s.textContent = "— ";
+        t.prepend(s);
+      });
+    },
+  },
 ];
+
+/**
+ * 여러 편으로 나뉜 글(1편 index.html, 2편 02.html …)의 편 목록. 같은 폴더 안의 index·숫자 이름 페이지를 링크한 경우만
+ * @returns {{url:string, label:string}[]}  2편 이상이고 지금 페이지가 그 안에 있을 때만, 아니면 []
+ */
+export function findParts(doc, pageUrl) {
+  let base;
+  try {
+    base = new URL(pageUrl);
+  } catch {
+    return [];
+  }
+  const dir = base.pathname.replace(/[^/]*$/, "");
+  const name = (p) => p.slice(dir.length) || "index.html";
+  const isPart = (n) => /^(index|\d{1,2})\.html?$/i.test(n);
+  if (!isPart(name(base.pathname))) return [];
+  const found = new Map();
+  for (const a of doc.querySelectorAll("a[href]")) {
+    let u;
+    try {
+      u = new URL(a.getAttribute("href"), base);
+    } catch {
+      continue;
+    }
+    if (u.host !== base.host || !u.pathname.startsWith(dir) || u.pathname.slice(dir.length).includes("/")) continue;
+    const n = name(u.pathname);
+    if (!isPart(n)) continue;
+    const key = `${base.origin}${dir}${n.toLowerCase() === "index.htm" ? "index.html" : n}`;
+    // 목차 버튼의 제목(편 제목)이 있으면 그것을, 없으면 비워 둔다 ("다음", "2" 같은 글자는 제목이 아니다)
+    const label = (a.querySelector('[class*="label"]')?.textContent || a.textContent || "").replace(/\s+/g, " ").trim();
+    const good = label.length >= 3 && !/^(다음|이전|next|prev|前へ|次へ|\d+)$/i.test(label) ? label : "";
+    if (!found.has(key) || (!found.get(key) && good)) found.set(key, good);
+  }
+  const self = `${base.origin}${dir}${name(base.pathname)}`;
+  if (!found.has(self)) found.set(self, "");
+  if (found.size < 2 || found.size > 12) return [];
+  const order = (k) => (/index\.html?$/i.test(k) ? 1 : parseInt(k.match(/(\d+)\.html?$/i)[1], 10));
+  return [...found].sort((x, y) => order(x[0]) - order(y[0])).map(([url, label]) => ({ url, label }));
+}
 
 // 가져오기 전에 주소를 본문이 깔끔한 버전으로 바꾼다 (저장되는 url은 원래 주소 그대로).
 export function rewriteFetchUrl(raw) {
