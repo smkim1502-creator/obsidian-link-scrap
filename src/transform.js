@@ -355,8 +355,10 @@ export function parseTerms(text) {
 
 /** 글에 나오는 항목만 지시문용 줄로 */
 export function termLines(terms, text) {
+  // 대소문자는 가리지 않는다 (원문의 heavy iron boots, bottles도 Heavy iron boots, Bottle 항목에 걸리게)
+  const low = text.toLowerCase();
   return (terms || [])
-    .filter(([from]) => text.includes(from))
+    .filter(([from]) => low.includes(from.toLowerCase()) || (/^[A-Za-z]/.test(from) && low.includes(from.toLowerCase().replace(/y$/, "ie") + "s")))
     .map(([from, to]) => `${from} → ${to}`)
     .join("\n");
 }
@@ -386,8 +388,9 @@ export function claudePrompt({ title, markdown }, { translate, summary }, terms 
   if (summary) {
     rules.push(`아래 글을 ${lang}로 요약한다.`);
     rules.push(`첫 줄은 "# " 뒤에 ${translate ? "원래 제목을 한국어로 충실히 옮겨" : "원래 제목을 그대로"} 쓰고(새 제목을 짓지 않는다), 빈 줄 다음부터 요약을 쓴다.`);
-    rules.push("분량은 원문의 5분의 1 이내, 길어도 1,000자 정도로 한다.");
-    rules.push("첫 문단에 글의 요지를 한두 문장으로 쓰고, 이어서 중요한 사실·수치·주장·결론을 '- ' 항목 3~7개로 정리한다. 짧은 글이면 문단만 써도 된다.");
+    // 사용자 요구(2026-11-19): 관심 있는 내용이 빠지는 것보다, 빠짐없이 요약하고 필요 없는 항목을 사용자가 지우는 편이 낫다
+    rules.push("내용을 빠뜨리지 않는다. 원문에 나오는 주제·사실·수치·이유·예시·일화를 모두 담고, 무엇이 중요한지 골라 버리지 않는다. 필요 없는 항목은 읽는 사람이 직접 지운다. 분량은 정하지 않는다.");
+    rules.push("첫 문단에 글이 무엇에 관한 글인지(누가, 언제, 무엇을) 한두 문장으로 쓰고, 이어서 원문의 순서대로 주제마다 '- ' 항목 하나씩 쓴다. 인터뷰는 질문마다 한 항목에 답의 이유와 예시까지 담는다. 문장을 옮겨 적지 말고 줄여 쓰되 뜻이 달라지지 않게 한다.");
     rules.push("항목 앞에 '주제:' 같은 머리표나 굵은 소제목을 달지 않고 문장으로 쓴다. 한국어로 쓸 때는 '~했다', '~이다'로 끝나는 문어체로 쓴다.");
     rules.push("원문에 없는 해석·평가·배경지식은 덧붙이지 않는다. '이 글은', '요약하면' 같은 머리말 없이 바로 내용을 쓴다. 이미지·링크는 넣지 않는다.");
   } else {

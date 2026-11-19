@@ -22,6 +22,8 @@ assert.equal(termLines(terms, "カービィのエアライダー"), "カービ�
 const p = claudePrompt({ title: "『カービィのエアライダー』", markdown: "本文" }, { translate: true, summary: true }, terms);
 assert.ok(p.includes("사용자 용어집") && p.includes("カービィ → 커비") && !p.includes("카비 → 커비"), p);
 assert.ok(!claudePrompt({ title: "『カービィ』", markdown: "本文" }, { translate: false, summary: true }, terms).includes("용어집"));
+// 영어 원문은 대소문자·복수형을 가리지 않는다
+assert.equal(termLines([["Heavy iron boots", "헤비 부츠"], ["Bottle", "빈 병"], ["Fairy", "요정"]], "the heavy iron boots, five bottles, two fairies"), "Heavy iron boots → 헤비 부츠\nBottle → 빈 병\nFairy → 요정");
 console.log("3 지시문 OK");
 
 // 4) Claude가 놓쳐도 결과에 한 번 더 적용 (요약·번역 확인)

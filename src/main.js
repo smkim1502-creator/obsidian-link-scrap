@@ -17,7 +17,7 @@ import {
 import { scrapUrl, findUrl, cleanUrl, BLOCKED_TITLE } from "./scrap.js";
 import { safeFileName, USER_AGENT } from "./extract.js";
 import { buildIndex, suggest, suggestFolder } from "./related.js";
-import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms, claudeGlossary } from "./transform.js";
+import { transformArticle, finishDraft, claudeTitle, googleTitle, isKorean, ClaudeRefused, translateMarkdown, parseTerms, applyTerms, termLines } from "./transform.js";
 import { findKorean, addAuto, namesPrompt, parseNames, parseEnglish, fanWikisFor, htmlText, fixPrompt, parseFixPairs, replaceName } from "./lookup.js";
 import { claudeRunner, findClaude } from "./claude.js";
 import { KEY, draftHash, hasJobs, markerLine, parseNote, buildNote, statusLine, reviewLine, REVIEW_KEY } from "./pending.js";
@@ -708,7 +708,9 @@ export default class LinkScrapPlugin extends Plugin {
     const a = await this.fetchArticle(note.url);
     if (a.kind !== "article") throw new Error("원문 본문을 찾지 못했습니다");
     const src = `${a.title}\n${a.markdown}`;
-    const terms = (await this.termsFor(a, run, say)).filter(([from]) => src.includes(from));
+    const all = await this.termsFor(a, run, say);
+    const keep = new Set(termLines(all, src).split("\n"));
+    const terms = all.filter(([from, to]) => keep.has(`${from} → ${to}`));
     const body = `# ${note.title}\n\n${note.body}`;
     let pairs = [];
     if (terms.length) {
