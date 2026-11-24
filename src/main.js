@@ -266,9 +266,9 @@ export default class LinkScrapPlugin extends Plugin {
       if (!url) return this.openModal();
       const tags = (params.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       if (params.ask === "1" || params.ask === "true") return this.openModal(url);
-      // &reason=읽을거리&why=… : 고르는 창 없이 그 이유로 보낸다
+      // &reason=읽을거리&desc=…(설명, 예전 이름 why) : 고르는 창 없이 그 이유로 보낸다
       const reason = params.reason && this.settings.reasons.find((r) => r.name === params.reason);
-      if (reason) return this.sendTab(url, reason, params.why || "");
+      if (reason) return this.sendTab(url, reason, params.desc || params.why || "");
       const folder = params.folder || this.defaultFolder();
       if (params.translate === undefined && params.summary === undefined) return this.chooseMode(url, folder, tags);
       const on = (v) => v === "1" || v === "true";
@@ -1145,10 +1145,11 @@ class ModeModal extends Modal {
       return h;
     };
     label("켜 둔 이유");
-    const why = contentEl.createEl("input");
-    why.type = "text";
-    why.placeholder = "이유 한 줄 (비워도 됨)";
-    why.style.cssText = "width:100%;margin-top:8px;";
+    // 설명: 수집함 노트에서 링크 대신 맨 앞에 보인다 (링크 제목만으로는 무엇인지 알기 어려워서)
+    const why = contentEl.createEl("textarea");
+    why.rows = 2;
+    why.placeholder = "설명: 무엇인지, 왜 켜 뒀는지 (비워도 됨)";
+    why.style.cssText = "width:100%;margin-top:8px;resize:vertical;";
     why.addEventListener("input", () => (this.why = why.value));
     this.reasonGrid = contentEl.createDiv();
     this.drawReasons();

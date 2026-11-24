@@ -48,17 +48,27 @@ const linkText = (t) => t.replace(/\s+/g, " ").replace(/\[/g, "〔").replace(/\]
 // 주소 속 괄호·공백은 링크를 끊으므로 인코딩한다
 const linkUrl = (u) => u.replace(/ /g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29");
 
+/** 설명 칸 정리: 줄바꿈은 띄어쓰기로, 링크 주소만 붙여 넣은 경우는 설명이 아니므로 비운다 */
+export function cleanDesc(desc, url = "") {
+  let d = (desc || "").replace(/\s+/g, " ").trim();
+  if (url) d = d.split(url).join(" ").replace(/\s+/g, " ").trim();
+  if (/^https?:\/\/\S+$/i.test(d)) return "";
+  return d.replace(/^[-—·:|\s]+|[-—·:|\s]+$/g, "");
+}
+
 /**
- * 이유 노트에 넣을 한 줄. 할 일처럼 체크할 수 있게 체크박스로 시작한다.
+ * 이유 노트에 넣을 항목 (두 줄). 할 일처럼 체크할 수 있게 체크박스로 시작한다.
+ * 첫 줄: 설명(있으면) 또는 링크 — 무엇인지가 먼저 보이게
+ * 둘째 줄(들여쓰기): 스크랩한 날짜와 링크
  * note가 있으면(본문도 저장한 경우) 그 노트를 먼저 링크한다
  */
 export function tabLine({ title, url, note = "", why = "", date }) {
   const head = note ? `[[${note}]] · [원문](${linkUrl(url)})` : `[${linkText(title) || url}](${linkUrl(url)})`;
-  const w = (why || "").replace(/\s+/g, " ").trim();
-  return `- [ ] ${head}${w ? ` — ${w}` : ""} (${date})`;
+  const desc = cleanDesc(why, url);
+  return desc ? `- [ ] ${desc}\n\t- ${date} 스크랩 · ${head}` : `- [ ] ${head}\n\t- ${date} 스크랩`;
 }
 
-/** 이유 노트에 한 줄을 더한다. 같은 주소가 이미 있으면 null */
+/** 이유 노트에 항목 하나를 더한다. 같은 주소가 이미 있으면 null */
 export function addTabLine(text, name, line, url) {
   if (text && text.includes(`(${linkUrl(url)})`)) return null;
   if (!text || !text.trim()) return `# ${name}\n\n${line}\n`;

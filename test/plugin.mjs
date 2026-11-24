@@ -91,14 +91,16 @@ const search = "https://www.google.com/search?q=%ED%81%B4%EB%A1%9C%EB%93%9C+%EC%
 plugin.chooseMode(search, "__auto__", []);
 const q2 = mock.modals.at(-1);
 q2.onOpen();
-const whyInput = q2.contentEl.querySelector("input");
-whyInput.value = "나중에 써 보고 싶어서";
+const whyInput = q2.contentEl.querySelector("textarea");
+assert.match(whyInput.placeholder, /^설명/);
+whyInput.value = "나중에\n써 보고 싶어서";
 whyInput.dispatchEvent(new q2.contentEl.ownerDocument.defaultView.Event("input"));
 buttonsOf(q2).find((x) => x.textContent === "해 보고 싶은 것").click();
 await new Promise((r) => setTimeout(r, 50));
 const todo = vault.getAbstractFileByPath("수집함/해 보고 싶은 것.md");
 assert.ok(todo, "이유 노트가 생겨야 함");
-assert.match(todo.data, /^# 해 보고 싶은 것\n\n- \[ \] \[구글 검색: 클로드 컴퓨터 유즈\]\(https:\/\/www\.google\.com\/search\?q=[^)]+\) — 나중에 써 보고 싶어서 \(\d{4}-\d\d-\d\d\)\n$/);
+// 설명이 첫 줄, 둘째 줄(들여쓰기)에 스크랩 날짜와 링크
+assert.match(todo.data, /^# 해 보고 싶은 것\n\n- \[ \] 나중에 써 보고 싶어서\n\t- \d{4}-\d\d-\d\d 스크랩 · \[구글 검색: 클로드 컴퓨터 유즈\]\(https:\/\/www\.google\.com\/search\?q=[^)]+\)\n$/);
 assert.match(mock.notices.at(-1), /「해 보고 싶은 것」에 넣었습니다/);
 // 같은 링크는 한 번만
 await plugin.sendTab(search, reasonOf("해 보고 싶은 것"));
@@ -107,12 +109,13 @@ assert.match(mock.notices.at(-1), /이미 「해 보고 싶은 것」에 있는 
 // 링크만: 페이지 제목을 가져와 적는다
 await plugin.sendTab("https://www.nintendo.co.jp/jobs/keyword/181.html", reasonOf("만들고 싶은 것"));
 const make = vault.getAbstractFileByPath("수집함/만들고 싶은 것.md");
-assert.match(make.data, /^- \[ \] \[.*ゲームチャット.*\]\(https:\/\/www\.nintendo\.co\.jp\/jobs\/keyword\/181\.html\) \(\d{4}-/m);
+// 설명이 없으면 첫 줄은 링크, 둘째 줄은 날짜만
+assert.match(make.data, /^- \[ \] \[.*ゲームチャット.*\]\(https:\/\/www\.nintendo\.co\.jp\/jobs\/keyword\/181\.html\)\n\t- \d{4}-\d\d-\d\d 스크랩\n/m);
 // 읽을거리: 본문까지 스크랩(노트는 열지 않음, 한국어 글은 번역 안 한다는 알림 없음)하고 그 노트를 링크
 const nOpened = opened.length;
 await plugin.sendTab("https://m.ruliweb.com/nin/board/300004/read/2365831?page=3", reasonOf("읽을거리"), "주말에");
 const read = vault.getAbstractFileByPath("수집함/읽을거리.md");
-assert.match(read.data, /^- \[ \] \[\[[^\]]+\]\] · \[원문\]\(https:\/\/m\.ruliweb\.com\/nin\/board\/300004\/read\/2365831[^)]*\) — 주말에 \(/m, read.data);
+assert.match(read.data, /^- \[ \] 주말에\n\t- \d{4}-\d\d-\d\d 스크랩 · \[\[[^\]]+\]\] · \[원문\]\(https:\/\/m\.ruliweb\.com\/nin\/board\/300004\/read\/2365831[^)]*\)\n/m, read.data);
 assert.equal(opened.length, nOpened, "탭 보내기는 노트를 열지 않음");
 assert.ok(!mock.notices.some((n) => /한국어 글이라 번역하지/.test(n)));
 // 창에서 새 이유를 만들고 바로 보낸다
@@ -126,9 +129,17 @@ buttonsOf(q3).find((x) => x.textContent === "만들고 보내기").click();
 await new Promise((r) => setTimeout(r, 3000));
 assert.ok(reasonOf("돈 생기면"), "새 이유가 설정에 남아야 함");
 assert.ok(vault.getAbstractFileByPath("수집함/돈 생기면.md")?.data.includes("keyword/124.html"));
-// 주소로 부르기: &reason=…&why=…
+// 주소로 부르기: &reason=…&desc=…(예전 이름 why도 받음)
 await plugin.protocol({ action: "scrap", url: "https://www.google.com/search?q=%EB%AF%B8%EC%86%8C", reason: "해 보고 싶은 것", why: "표정 연습" });
-assert.match(todo.data, /구글 검색: 미소\]\(.*\) — 표정 연습 \(/);
+assert.match(todo.data, /^- \[ \] 표정 연습\n\t- \d{4}-\d\d-\d\d 스크랩 · \[구글 검색: 미소\]\(/m);
+await plugin.protocol({ action: "scrap", url: "https://www.google.com/search?q=%EC%9B%83%EC%9D%8C", reason: "해 보고 싶은 것", desc: "웃는 연습" });
+assert.match(todo.data, /^- \[ \] 웃는 연습\n\t- \d{4}-\d\d-\d\d 스크랩 · \[구글 검색: 웃음\]\(/m);
+// 설명 칸에 링크 주소만 넣은 경우는 설명으로 치지 않는다 (볼거리 노트에 주소가 두 번 적혔던 일)
+const { cleanDesc } = await import("../src/reasons.js");
+assert.equal(cleanDesc("https://sleepyzone.online/char-db-cn/", "https://sleepyzone.online/char-db-cn/"), "");
+assert.equal(cleanDesc("https://a.com/x", "https://b.com/y"), "");
+assert.equal(cleanDesc("옷 갈아입히기 사이트 https://a.com/x", "https://a.com/x"), "옷 갈아입히기 사이트");
+assert.equal(cleanDesc("  두 줄\n설명  "), "두 줄 설명");
 // 저장된 이유 목록을 불러와도 기본값을 건드리지 않는다
 const loaded = await migrate({ settingsVersion: 2, reasons: [{ name: "하나뿐" }] });
 assert.deepEqual(loaded.settings.reasons, [{ name: "하나뿐", scrap: "" }]);
